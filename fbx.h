@@ -1256,6 +1256,11 @@ struct fbx_importer {
   const fbx_template_t *templates;
   fbx_uint32_t num_of_templates;
 
+  // We preemptively cache pointers to commonly used templates to amortize
+  // cost of lookups.
+  const fbx_template_t *model_template;
+  const fbx_template_t *geometry_template;
+
   // As of FBX 7.5 (also known as FBX 2016) nodes are described with 64-bit
   // width types (rather than the original 32-bit types) and empty nodes are
   // 25 bytes long (rather than the original 13 bytes). This tracks if the
@@ -1336,6 +1341,10 @@ static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
   importer->num_of_nodes = 0;
   importer->templates = NULL;
   importer->num_of_templates = 0;
+
+  // Pointers to templates are cached after definitions are processed.
+  importer->model_template = NULL;
+  importer->geometry_template = NULL;
 
   // Create a dummy root node as it makes various operations are lot easier.
   fbx_node_t *root = fbx_importer_alloc_a_node(importer);
@@ -1890,6 +1899,12 @@ static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
       tmpl->properties = NULL;
       tmpl->num_of_properties = 0;
     }
+
+    // Preemptively cache pointers to templates to amortize cost of lookups.
+    if (strcmp(tmpl->name, "Model") == 0)
+      importer->model_template = tmpl;
+    else if (strcmp(tmpl->name, "Geometry") == 0)
+      importer->geometry_template = tmpl;
   }
 
   return FBX_TRUE;
