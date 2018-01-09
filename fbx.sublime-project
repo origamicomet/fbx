@@ -1,0 +1,23 @@
+{
+	"folders":
+	[
+		{
+			"path": ".",
+
+			"follow_symlinks": true,
+
+			"file_exclude_patterns": [
+				"*.exe",
+				"*.dll",
+				"*.pdb",
+				"*.obj",
+				"*.ilk",
+				"*.exp"
+			],
+
+			"folder_exclude_patterns": [
+				"_build/tools/cache",
+			]
+		}
+	]
+}

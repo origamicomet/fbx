@@ -1,0 +1,14 @@
+# Ignore Sublime Text 2/3 junk.
+*.sublime-workspace
+
+# Ignore automatically fetched tools.
+_build/tools/cache
+
+# Ignore build intermediates.
+*.obj
+*.ilk
+
+# Ingore build artifacts.
+*.lib
+*.exe
+*.pdb
