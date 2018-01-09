@@ -347,9 +347,6 @@ typedef struct fbx_vec3 {
   fbx_real32_t x, y, z;
 } fbx_vec3_t;
 
-/// Scales @v by @s.
-extern fbx_vec3_t fbx_vec3_muls(const fbx_vec3_t v, fbx_real32_t s);
-
 typedef struct fbx_vec4 {
   fbx_real32_t x, y, z, w;
 } fbx_vec4_t;
@@ -1218,6 +1215,18 @@ static fbx_node_t *fbx_node_child_by_name(fbx_node_t *node,
     return FBX_FALSE;                                  \
   }
 
+// TODO(mtwilliams): Build hash tables to reduce cost of looking up defaults.
+
+typedef struct fbx_template {
+  const char *name;
+
+  const fbx_property_t *properties;
+  fbx_uint32_t num_of_properties;
+
+  // Node that defined this type.
+  const fbx_node_t *definition;
+} fbx_template_t;
+
 //  _____                   _
 // |     |_____ ___ ___ ___| |_
 // |-   -|     | . | . |  _|  _|
@@ -1242,6 +1251,10 @@ struct fbx_importer {
   // Internal representation of hierarchy encountered in `.fbx`.
   fbx_node *nodes;
   fbx_uint32_t num_of_nodes;
+
+  // Internal representation of types of object as defined in `.fbx`.
+  const fbx_template_t *templates;
+  fbx_uint32_t num_of_templates;
 
   // As of FBX 7.5 (also known as FBX 2016) nodes are described with 64-bit
   // width types (rather than the original 32-bit types) and empty nodes are
@@ -1321,6 +1334,8 @@ static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
   // Set reasonable defaults.
   importer->nodes = NULL;
   importer->num_of_nodes = 0;
+  importer->templates = NULL;
+  importer->num_of_templates = 0;
 
   // Create a dummy root node as it makes various operations are lot easier.
   fbx_node_t *root = fbx_importer_alloc_a_node(importer);
@@ -1409,26 +1424,16 @@ static fbx_bool_t fbx_extract_any_properties(fbx_importer_t *importer,
     properties[property].type = fbx_property_type_by_name(ref_to_type.string,
                                                           ref_to_type.length);
 
-    char *name = (char *)fbx_block_allocate_s(&importer->memory.strings,
-                                              ref_to_name.length + 1);
-
-    properties[property].name = name;
-
-    memcpy((void *)name, ref_to_name.pointer, ref_to_name.length);
-
-    // Null terminate, since Autodesk doesn't understand "ease of use" or the
-    // difference between strings and binaries.
-    name[ref_to_name.length] = '\0';
+    properties[property].name =
+      fbx_importer_intern_a_string_from_ref(importer, ref_to_name);
 
     // Appears to hint the sub-type?
     fbx_ref_to_data_t ref_to_hint;
     fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_hint);
 
     if (ref_to_hint.length > 0) {
-      char *hint = (char *)fbx_block_allocate_s(&importer->memory.strings, ref_to_hint.length + 1);
-      memcpy((void *)hint, ref_to_hint.pointer, ref_to_hint.length);
-      hint[ref_to_hint.length] = '\0';
-      properties[property].hint = hint;
+      properties[property].hint =
+        fbx_importer_intern_a_string_from_ref(importer, ref_to_hint);
     } else {
       properties[property].hint = NULL;
     }
@@ -1786,10 +1791,10 @@ static fbx_bool_t fbx_process_a_header_extension_node(fbx_importer_t *importer,
   return FBX_TRUE;
 }
 
-static fbx_vec3_t fbx_basis_from_code_and_sign(fbx_int32_t code,
+static fbx_vec3_t fbx_basis_from_axis_and_sign(fbx_int32_t axis,
                                                fbx_int32_t sign)
 {
-  switch (code) {
+  switch (axis) {
     case 0: return { sign ? 1.f : -1.f, 0.f, 0.f };
     case 1: return { 0.f, sign ? 1.f : -1.f, 0.f };
     case 2: return { 0.f, 0.f, sign ? 1.f : -1.f };
@@ -1818,20 +1823,74 @@ static fbx_bool_t fbx_process_a_global_settings_node(fbx_importer_t *importer,
   fbx_node_property_by_name_s(global_settings_node, "CoordAxis", coord_axis_property);
   fbx_node_property_by_name_s(global_settings_node, "CoordAxisSign", coord_axis_sign_property);
 
-  const fbx_int32_t up_axis_code = up_axis_property->value.as_an_integer;
+  const fbx_int32_t up_axis = up_axis_property->value.as_an_integer;
   const fbx_int32_t up_axis_sign = up_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.up = fbx_basis_from_code_and_sign(up_axis_code, up_axis_sign);
+  importer->fbx->basis.up = fbx_basis_from_axis_and_sign(up_axis, up_axis_sign);
 
-  const fbx_int32_t front_axis_code = front_axis_property->value.as_an_integer;
+  const fbx_int32_t front_axis = front_axis_property->value.as_an_integer;
   const fbx_int32_t front_axis_sign = front_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.forward = fbx_basis_from_code_and_sign(front_axis_code, !front_axis_sign);
+  importer->fbx->basis.forward = fbx_basis_from_axis_and_sign(front_axis, !front_axis_sign);
 
-  const fbx_int32_t coord_axis_code = coord_axis_property->value.as_an_integer;
+  const fbx_int32_t coord_axis = coord_axis_property->value.as_an_integer;
   const fbx_int32_t coord_axis_sign = coord_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.right = fbx_basis_from_code_and_sign(coord_axis_code, coord_axis_sign);
+  importer->fbx->basis.right = fbx_basis_from_axis_and_sign(coord_axis, coord_axis_sign);
+
+  // HACK(mtwilliams): Assume origin at (0, 0, 0).
+  importer->fbx->origin = { 0.f, 0.f, 0.f };
+
+  return FBX_TRUE;
+}
+
+static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
+                                              fbx_node_t *definitions_node)
+{
+  // We have to count the number of definitions, because unlike the name would
+  // imply, the "Count" node refers to the number of objects (using the
+  // definitions?) rather than the number of definitions themselves? This might
+  // very well be a bug that's been solidified in the name of backwards
+  // compatibility. Sigh.
+
+  fbx_uint32_t count = 0;
+
+  for (fbx_node_t *child = definitions_node->children; child; child = child->sibling)
+    if (strcmp(child->name, "ObjectType") == 0)
+      count += 1;
+
+  fbx_template_t *templates =
+    (fbx_template_t *)fbx_block_allocate_s(&importer->memory.transient,
+                                           count * sizeof(fbx_template_t));
+
+  importer->templates = templates;
+  importer->num_of_templates = count;
+
+  fbx_uint32_t encountered = 0;
+
+  for (fbx_node_t *definition_node = definitions_node->children; definition_node; definition_node = definition_node->sibling) {
+    if (strcmp(definition_node->name, "ObjectType") != 0)
+      // Only care about definitions.
+      continue;
+
+    fbx_template_t *tmpl = &templates[encountered++];
+
+    tmpl->definition = definition_node;
+
+    fbx_ref_to_data_t ref_to_name;
+    fbx_extract_a_datum_from_node_s(FBX_STRING_DATUM, definition_node, &ref_to_name);
+
+    tmpl->name = fbx_importer_intern_a_string_from_ref(importer, ref_to_name);
+
+    // Appears that some definitions don't provide a template at all?
+    if (fbx_node_t *template_node = fbx_node_child_by_name(definition_node, "PropertyTemplate")) {
+      tmpl->properties = template_node->properties;
+      tmpl->num_of_properties = template_node->num_of_properties;
+    } else {
+      tmpl->properties = NULL;
+      tmpl->num_of_properties = 0;
+    }
+  }
 
   return FBX_TRUE;
 }
@@ -1851,6 +1910,17 @@ static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
   // Process extended header to gather metadata.
   if (!fbx_process_a_header_extension_node(importer, header_extension_node))
     return FBX_FALSE;
+
+  // Definitions define types of objects and default properties to associate
+  // with each instance. However, they're optional, so there may be no
+  // "templates" and only given properties to go on, so beware!
+  if (fbx_node_t *definitions_node = fbx_node_child_by_name(root, "Definitions")) {
+    if (!fbx_process_any_definitions(importer, definitions_node))
+      return FBX_FALSE;
+  } else {
+    importer->templates = NULL;
+    importer->num_of_templates = 0;
+  }
 
   fbx_node_t *global_settings_node;
   fbx_node_child_by_name_s(root, "GlobalSettings", global_settings_node);
