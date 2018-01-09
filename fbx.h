@@ -429,6 +429,19 @@ static fbx_color_t fbx_rgbaf(fbx_real32_t r, fbx_real32_t g, fbx_real32_t b, fbx
 // Bindings?
 // Custom properties?
 
+typedef enum fbx_object_type {
+  FBX_UNKNOWN = 0,
+  FBX_EMPTY   = 1,
+  FBX_MODEL   = 2,
+  FBX_MESH    = 3
+} fbx_object_type_t;
+
+typedef struct fbx_object {
+  fbx_uint64_t id;
+  fbx_object_type_t type;
+  void *reified;
+} fbx_object_t;
+
 typedef struct fbx_material fbx_material_t;
 typedef struct fbx_texture fbx_texture_t;
 
@@ -487,6 +500,11 @@ typedef struct fbx_basis {
 
 // TODO(mtwilliams): Units per meter?
 
+typedef struct fbx_scene {
+  fbx_object_t * const *objects;
+  fbx_uint32_t num_of_objects;
+} fbx_scene_t;
+
 typedef struct fbx {
   fbx_uint32_t version;
 
@@ -499,6 +517,8 @@ typedef struct fbx {
   fbx_vec3_t origin;
 
   fbx_timestamp_t timestamp;
+
+  fbx_scene_t scene;
 } fbx_t;
 
 //  _____                   _
@@ -1227,6 +1247,15 @@ typedef struct fbx_template {
   const fbx_node_t *definition;
 } fbx_template_t;
 
+static const fbx_property_t *fbx_template_property_by_name(const fbx_template_t *tmpl,
+                                                           const char *name)
+{
+  for (fbx_uint32_t property = 0; property < tmpl->num_of_properties; ++property)
+    if (strcmp(tmpl->properties[property].name, name) == 0)
+      return &tmpl->properties[property];
+  return NULL;
+}
+
 //  _____                   _
 // |     |_____ ___ ___ ___| |_
 // |-   -|     | . | . |  _|  _|
@@ -1261,6 +1290,10 @@ struct fbx_importer {
   const fbx_template_t *model_template;
   const fbx_template_t *geometry_template;
 
+  // Legally, a `.fbx` can lack any definitions, objects, and connections,
+  // making it empty, at least for our uses.
+  fbx_bool_t is_basically_empty;
+
   // As of FBX 7.5 (also known as FBX 2016) nodes are described with 64-bit
   // width types (rather than the original 32-bit types) and empty nodes are
   // 25 bytes long (rather than the original 13 bytes). This tracks if the
@@ -1270,6 +1303,28 @@ struct fbx_importer {
   // We reuse the same empty string since we encounter them so often.
   const char *an_empty_string;
 };
+
+static const char *fbx_importer_intern_a_string(fbx_importer_t *importer,
+                                                const char *string,
+                                                fbx_size_t length)
+{
+  if (length) {
+    char *interned = (char *)fbx_block_allocate_s(&importer->memory.strings, length + 1);
+    memcpy((void *)interned, (const void *)string, length);
+    interned[length] = '\0';
+    return interned;
+  }
+
+  // Empty string optimization.
+  return importer->an_empty_string;
+}
+
+static const char *fbx_importer_intern_a_string_from_ref(fbx_importer_t *importer,
+                                                         const fbx_ref_to_data_t ref)
+{
+  return fbx_importer_intern_a_string(importer, ref.string, ref.length);
+}
+
 
 static fbx_node_t *fbx_importer_alloc_a_node(fbx_importer_t *importer) {
   fbx_node_t *node =
@@ -1292,25 +1347,13 @@ static fbx_node_t *fbx_importer_alloc_a_node(fbx_importer_t *importer) {
   return node;
 }
 
-static const char *fbx_importer_intern_a_string(fbx_importer_t *importer,
-                                                const char *string,
-                                                fbx_size_t length)
+static fbx_object_t *fbx_importer_alloc_an_object(fbx_importer_t *importer)
 {
-  if (length) {
-    char *interned = (char *)fbx_block_allocate_s(&importer->memory.strings, length + 1);
-    memcpy((void *)interned, (const void *)string, length);
-    interned[length] = '\0';
-    return interned;
-  }
+  fbx_object_t *object =
+    (fbx_object_t *)fbx_block_allocate_s(&importer->memory.permanent,
+                                         sizeof(fbx_object_t));
 
-  // Empty string optimization.
-  return importer->an_empty_string;
-}
-
-static const char *fbx_importer_intern_a_string_from_ref(fbx_importer_t *importer,
-                                                         const fbx_ref_to_data_t ref)
-{
-  return fbx_importer_intern_a_string(importer, ref.string, ref.length);
+  return object;
 }
 
 static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
@@ -1342,13 +1385,16 @@ static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
   importer->templates = NULL;
   importer->num_of_templates = 0;
 
+  // Create a dummy root node as it makes various operations are lot easier.
+  fbx_node_t *root = fbx_importer_alloc_a_node(importer);
+  importer->nodes = root;
+
   // Pointers to templates are cached after definitions are processed.
   importer->model_template = NULL;
   importer->geometry_template = NULL;
 
-  // Create a dummy root node as it makes various operations are lot easier.
-  fbx_node_t *root = fbx_importer_alloc_a_node(importer);
-  importer->nodes = root;
+  // Assume there's a scene for us. There may not be though!
+  importer->is_basically_empty = FBX_FALSE;
 
   // Assume older format until otherwise specified.
   importer->using_newer_format = FBX_FALSE;
@@ -1910,6 +1956,140 @@ static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
   return FBX_TRUE;
 }
 
+#define fbx_property_or_default_by_name(Base, Node, Name, Property) \
+  if (!(Property = fbx_node_property_by_name(Node, Name))) {        \
+    if (Base) {                                                     \
+      Property = fbx_template_property_by_name(Base, Name);         \
+    }                                                               \
+  }
+
+#define fbx_property_or_default_by_name_s(Base, Node, Name, Property) \
+  if (!(Property = fbx_node_property_by_name(Node, Name))) {          \
+    if (Base) {                                                       \
+      if (!(Property = fbx_template_property_by_name(Base, Name))) {  \
+        return FBX_FALSE;                                             \
+      }                                                               \
+    } else {                                                          \
+      return FBX_FALSE;                                               \
+    }                                                                 \
+  }
+
+static fbx_bool_t fbx_reify_a_model(fbx_importer_t *importer,
+                                    fbx_node_t *node)
+{
+  const fbx_template_t *base = importer->model_template;
+
+  const fbx_property_t *local_translation_property,
+                       *local_rotation_property,
+                       *local_scaling_property;
+
+  fbx_property_or_default_by_name_s(base, node, "Lcl Translation", local_translation_property);
+  fbx_property_or_default_by_name_s(base, node, "Lcl Rotation", local_rotation_property);
+  fbx_property_or_default_by_name_s(base, node, "Lcl Scaling", local_scaling_property);
+
+  // Translation
+   // TranslationActive => Toggle
+   // TranslationMin and TranslationMax
+    // TranslationMin{X,Y,Z} and TranslationMax{X,Y,Z} => Toggle
+  // Rotation
+   // RotationActive => Toggle
+   // RotationOrder => Application of Euler angles. Only matters during construction.
+   // RotationMin and RotationMax
+    // RotationMin{X,Y,Z} and RotationMax{X,Y,Z} => Toggle
+  // Scaling
+   // ScalingActive => Toggle
+   // ScalingMin and ScalingMax
+    // ScalingMin{X,Y,Z} and ScalingMax{X,Y,Z} => Toggle
+
+  // Show
+  // Freeze
+  // Visibility
+  // Inheritance
+   // Shove into `fbx_model_t` and fixup after reification?
+
+  return FBX_TRUE;
+}
+
+static fbx_bool_t fbx_reify_some_geometry(fbx_importer_t *importer,
+                                          fbx_node_t *node)
+{
+  return FBX_TRUE;
+}
+
+// BUG(mtwilliams): Appears that "Objects" and "Connections" may be optional
+// nodes. The resulting file wouldn't be useful, but should be handled
+// gracefully.
+
+static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
+                                         fbx_node_t *node)
+{
+  fbx_object_t *object = fbx_importer_alloc_an_object(importer);
+
+  const void *cursor = node->data;
+
+  fbx_uint64_t id;
+  fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id);
+
+#if 0
+  fbx_ref_to_data_t ref_to_name_and_class;
+  fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_name_and_class);
+
+  fbx_ref_to_data_t ref_to_sub_class;
+  fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_sub_class);
+#endif
+
+  object->id = id;
+
+  if (strcmp(node->name, "Model") == 0) {
+    object->type = FBX_MODEL;
+  } else if (strcmp(node->name, "Geometry") == 0) {
+    object->type = FBX_MESH;
+  } else {
+    object->type = FBX_UNKNOWN;
+  }
+
+  object->reified = NULL;
+
+  return object;
+}
+
+static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *importer,
+                                                               fbx_node_t *root)
+{
+  fbx_node_t *definitions_node;
+  fbx_node_child_by_name_s(root, "Definitions", definitions_node);
+
+  fbx_node_t *count_node;
+  fbx_node_child_by_name_s(definitions_node, "Count", count_node);
+
+  // Non-intuitively, this is actually the number of objects. Yeah...
+  fbx_uint32_t count;
+  fbx_extract_a_datum_from_node_s(FBX_INT32_DATUM, count_node, &count);
+
+  // TODO(mtwilliams): Insert a root node?
+
+  // Appears that there's an extra object counted. "GlobalSettings" might be
+  // include in the count.
+  count -= 1;
+
+  fbx_object_t **objects =
+    (fbx_object_t **)fbx_block_allocate_s(&importer->memory.permanent,
+                                          count * sizeof(fbx_object_t *));
+
+  importer->fbx->scene.objects = objects;
+  importer->fbx->scene.num_of_objects = count;
+
+  fbx_node_t *objects_node;
+  fbx_node_child_by_name_s(root, "Objects", objects_node);
+
+  fbx_uint32_t reified = 0;
+
+  for (fbx_node_t *object_node = objects_node->children; object_node; object_node = object_node->sibling)
+    objects[reified++] = fbx_reify_an_object(importer, object_node);
+
+  return FBX_TRUE;
+}
+
 static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
   fbx_node_t *root = importer->nodes;
 
@@ -1926,22 +2106,38 @@ static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
   if (!fbx_process_a_header_extension_node(importer, header_extension_node))
     return FBX_FALSE;
 
+  fbx_node_t *global_settings_node;
+  fbx_node_child_by_name_s(root, "GlobalSettings", global_settings_node);
+
+  // Process global settings to determine basis and origin.
+  if (!fbx_process_a_global_settings_node(importer, global_settings_node))
+    return FBX_FALSE;
+
   // Definitions define types of objects and default properties to associate
-  // with each instance. However, they're optional, so there may be no
-  // "templates" and only given properties to go on, so beware!
+  // with each instance.
   if (fbx_node_t *definitions_node = fbx_node_child_by_name(root, "Definitions")) {
     if (!fbx_process_any_definitions(importer, definitions_node))
       return FBX_FALSE;
   } else {
     importer->templates = NULL;
     importer->num_of_templates = 0;
+
+    // If no definitions are provided, it's reasonable to assume no objects or
+    // connections are provided, because they're intimately coupled. The result
+    // is basically an empty scene.
+    importer->is_basically_empty = FBX_TRUE;
   }
 
-  fbx_node_t *global_settings_node;
-  fbx_node_child_by_name_s(root, "GlobalSettings", global_settings_node);
+  if (importer->is_basically_empty) {
+    importer->fbx->scene.objects = NULL;
+    importer->fbx->scene.num_of_objects = 0;
 
-  // Process global settings to determine basis and origin.
-  if (!fbx_process_a_global_settings_node(importer, global_settings_node))
+    return FBX_TRUE;
+  }
+
+  // Process objects and their implicit and explicit connections into a form
+  // that's easily digested. This is where the magic happens.
+  if (!fbx_reify_applicable_objects_and_connections(importer, root))
     return FBX_FALSE;
 
   return FBX_TRUE;

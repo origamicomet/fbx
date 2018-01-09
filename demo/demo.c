@@ -138,5 +138,29 @@ int main(int argc, const char *argv[]) {
           importer->fbx->basis.forward.x, importer->fbx->basis.forward.y, importer->fbx->basis.forward.z,
           importer->fbx->basis.right.x, importer->fbx->basis.right.y, importer->fbx->basis.right.z);
 
+  fbx_uint32_t num_of_empties = 0;
+  fbx_uint32_t num_of_models = 0;
+  fbx_uint32_t num_of_meshes = 0;
+
+  for (fbx_uint32_t object = 0; object < importer->fbx->scene.num_of_objects; ++object) {
+    switch (importer->fbx->scene.objects[object]->type) {
+      case FBX_EMPTY: num_of_empties += 1; break;
+      case FBX_MODEL: num_of_models += 1; break;
+      case FBX_MESH: num_of_meshes += 1; break;
+    }
+  }
+
+  fprintf(stdout,
+          "Scene is composed of %u objects.\n"
+          " There are %u empties.\n"
+          " There are %u models.\n"
+          " There are %u meshes.\n",
+          importer->fbx->scene.num_of_objects,
+          num_of_empties,
+          num_of_models,
+          num_of_meshes);
+
+  for (;;);
+
   return EXIT_SUCCESS;
 }
