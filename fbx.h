@@ -438,6 +438,7 @@ typedef enum fbx_object_type {
 typedef struct fbx_object {
   fbx_uint64_t id;
   fbx_object_type_t type;
+  const char *name;
   void *reified;
 } fbx_object_t;
 
@@ -2163,6 +2164,15 @@ static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
   fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_sub_class);
 
   object->id = id;
+
+  /* Name is delimited from class by `\x0\x1`. */
+  if (fbx_size_t length_of_name = strlen(ref_to_name_and_class.string)) {
+    object->name = fbx_importer_intern_a_string(importer,
+                                                ref_to_name_and_class.string,
+                                                length_of_name);
+  } else {
+    object->name = NULL;
+  }
 
   /* Rather than relying on the hard to decipher type and sub-type strings, we
      guess the type from the node's name. This appears to work well enough. */
