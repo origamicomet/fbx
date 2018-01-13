@@ -155,7 +155,7 @@ typedef double fbx_real64_t;
 #endif
 
 /* We (have to) define our own boolean type regardless of compiler support
- * to prevent its width from being changed on us. */
+   to prevent its width from being changed on us. */
 typedef fbx_uint32_t fbx_bool_t;
 
 #define FBX_TRUE  ((fbx_bool_t)1)
@@ -256,8 +256,10 @@ extern FBX_EXPORT(void)
 /*! A source of data. */
 typedef struct fbx_stream fbx_stream_t;
 
-/*! Wraps a @buffer of @size bytes in a stream.
- * \param @free_on_close Toggles freeing of @buffer after stream is closed. */
+/*!
+ * Wraps a @buffer of @size bytes in a stream.
+ * \param @free_on_close Toggles freeing of @buffer after stream is closed.
+ */
 extern FBX_EXPORT(fbx_stream_t *)
   fbx_stream_open_from_memory(const void *buffer,
                               fbx_size_t size,
@@ -265,14 +267,18 @@ extern FBX_EXPORT(fbx_stream_t *)
 
 #ifndef FBX_NO_STANDARD_LIBRARY
 
-/*! Wraps @file in a stream.
- * \param @close_after_use Toggles closing of @file after exhaustion. */
+/*!
+ * Wraps @file in a stream.
+ * \param @close_after_use Toggles closing of @file after exhaustion.
+ */
 extern FBX_EXPORT(fbx_stream_t *)
   fbx_stream_open_from_file(FILE *file,
                             fbx_bool_t close_after_use);
 
-/*! Opens a stream for the file at @path.
- * \param @path Absolute or relative path to file to stream. */
+/*!
+ * Opens a stream for the file at @path.
+ * \param @path Absolute or relative path to file to stream.
+ */
 extern FBX_EXPORT(fbx_stream_t *)
   fbx_stream_open_from_path(const char *path);
 
@@ -281,25 +287,36 @@ extern FBX_EXPORT(fbx_stream_t *)
 /*! Closes @stream. */
 extern FBX_EXPORT(void) fbx_stream_close(fbx_stream_t *stream);
 
-/*! Returns absolute position in @stream. */
+/*!
+ * Returns absolute position in @stream.
+ */
 extern FBX_EXPORT(fbx_size_t)
   fbx_stream_tell(fbx_stream_t *stream);
 
-/*! Moves to absolute @offset in @stream.
- * \return `FBX_TRUE` if seek was successful, `FBX_FALSE` otherwise. */
+/*!
+ * Moves to absolute @offset in @stream.
+ *
+ * \returns `FBX_TRUE` if seek was successful, `FBX_FALSE` otherwise.
+ */
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_seek(fbx_stream_t *stream,
                   fbx_size_t offset);
 
-/*! Moves @offset bytes forward in @stream.
- * \return `FBX_TRUE` if skip was successful, `FBX_FALSE` otherwise. */
+/*!
+ * Moves @offset bytes forward in @stream.
+ *
+ * \returns `FBX_TRUE` if skip was successful, `FBX_FALSE` otherwise.
+ */
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_skip(fbx_stream_t *stream,
                   fbx_size_t offset);
 
-/*! Reads up to @count bytes to @buffer.
+/*!
+ * Reads up to @count bytes to @buffer.
+ *
  * \returns Number of bytes actually read. May be less than @count if @stream
- * is exhausted prior to completion. */
+ * is exhausted prior to completion.
+ */
 extern FBX_EXPORT(fbx_size_t)
   fbx_stream_read(fbx_stream_t *stream,
                   void *buffer,
@@ -309,76 +326,79 @@ extern FBX_EXPORT(fbx_size_t)
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_exhausted(fbx_stream_t *stream);
 
-//  _____     _   _
-// |     |___| |_| |_
-// | | | | .'|  _|   |
-// |_|_|_|__,|_| |_|_|
+/*  _____     _   _
+ * |     |___| |_| |_
+ * | | | | .'|  _|   |
+ * |_|_|_|__,|_| |_|_|
+ */
 
-/// \def FBX_PI
-/// \brief Ratio of a circle's circumference to its diameter.
+/*!
+ * \def FBX_PI
+ * \brief Ratio of a circle's circumference to its diameter.
+ */
 #define FBX_PI 3.14159265358979323846264338327950288f
 
-/// \def FBX_TAU
-/// \brief Twice as good as Pi.
-/// \see FBX_PI
+/*!
+ * \def FBX_TAU
+ * \brief Twice as good as Pi.
+ * \see FBX_PI
+ */
 #define FBX_TAU (2.f * FBX_PI)
 
-/// \brief Converts degrees to radians.
+/*! Converts degrees to radians. */
 static fbx_real32_t fbx_degrees_to_radians(const fbx_real32_t degrees) {
   return degrees * (180.f / FBX_PI);
 }
 
-/// \brief Converts radians to degrees.
+/*! Converts radians to degrees. */
 static fbx_real32_t fbx_radians_to_degrees(const fbx_real32_t radians) {
   return radians * (FBX_PI / 180.f);
 }
 
-typedef struct fbx_vec2 {
-  fbx_real32_t x, y;
-} fbx_vec2_t;
+/*! Represents a point or a direction in two-dimensional space. */
+typedef struct fbx_vec2 { fbx_real32_t x, y; } fbx_vec2_t;
 
-typedef struct fbx_vec3 {
-  fbx_real32_t x, y, z;
-} fbx_vec3_t;
+/*! Represents a point or a direction in three-dimensional space. */
+typedef struct fbx_vec3 { fbx_real32_t x, y, z; } fbx_vec3_t;
 
-typedef struct fbx_vec4 {
-  fbx_real32_t x, y, z, w;
-} fbx_vec4_t;
+/*! Represents a point or a direction in four-dimensional space. */
+typedef struct fbx_vec4 { fbx_real32_t x, y, z, w; } fbx_vec4_t;
 
-/// Represents a direction (and optionally, a magnitude).
+/*! Represents a direction (and optionally, a magnitude). */
 typedef struct fbx_quaternion {
   fbx_real32_t x, y, z, w;
 } fbx_quaternion_t;
 
-/// Identity quaternion.
+/*! Identity quaternion. */
 extern const fbx_quaternion_t FBX_IDENTITY_QUATERNION;
 
-/// Represents a linear transformation of three-dimensional space.
-///
-/// \remark We store matrices in column major order. This means columns are
-/// laid our contiguously in memory. We also uses columns vectors when
-/// multiplying matrices and vectors, meaning transformations are applied
-/// right-to-left.
-///
+/*!
+ * Represents a linear transformation of three-dimensional space.
+ *
+ * \remark We store matrices in column major order. This means columns are
+ * laid our contiguously in memory. We also uses columns vectors when
+ * multiplying matrices and vectors, meaning transformations are applied
+ * right-to-left.
+ */
 typedef struct fbx_mat4 {
   fbx_real32_t v[4][4];
 } fbx_mat4_t;
 
-/// Zero matrix.
+/*! Zero matrix. */
 extern const fbx_mat4_t FBX_ZERO_MATRIX;
 
-/// Identity matrix.
+/*! Identity matrix. */
 extern const fbx_mat4_t FBX_IDENTITY_MATRIX;
 
-//  _____     _
-// |     |___| |___ ___
-// |   --| . | | . |  _|
-// |_____|___|_|___|_|
+/*  _____     _
+ * |     |___| |___ ___
+ * |   --| . | | . |  _|
+ * |_____|___|_|___|_|
+ */
 
-// TODO(mtwilliams): HSL
-// TODO(mtwilliams): HSV
-// TODO(mtwilliams): YUV
+/* TODO(mtwilliams): HSL, HSV, and YUV? */
 
+/*! Represents a color. */
 typedef struct fbx_color {
   fbx_real32_t r, g, b, a;
 } fbx_color_t;
@@ -512,16 +532,22 @@ typedef struct fbx {
 /* TODO(mtwilliams): Triangulation. */
 
 typedef struct fbx_import_options {
-  /*! Memory to dedicate to permanent allocations. The permanent pool is only
-      freed when the imported scene is freed. */
+  /*!
+   * Amount of memory to dedicate to permanent allocations. The permanent pool
+   * is only freed when the imported scene is freed.
+   */
   fbx_size_t permanent_memory_pool;
 
-  /*! Memory to dedicate to transient allocations. The transient pool is freed
-      after importing. */
+  /*!
+   * Amount of memory to dedicate to transient allocations. The transient pool
+   * is freed after importing.
+   */
   fbx_size_t transient_memory_pool;
 
-  /*! Memory to dedicate to string allocations. The string pool is only freed
-      when the imported scene is freed. */
+  /*!
+   * Amount of memory to dedicate to string allocations. The string pool is
+   * only freed when the imported scene is freed.
+   */
   fbx_size_t strings_memory_pool;
 } fbx_import_options_t;
 
@@ -1253,8 +1279,10 @@ typedef struct fbx_property {
 
   const char *name;
 
-  // Sub-type?
+#if 0
+  /* Sub-type? */
   const char *hint;
+#endif
 
   fbx_uint32_t flags;
 
@@ -1571,19 +1599,21 @@ static fbx_bool_t fbx_extract_any_properties(fbx_importer_t *importer,
     properties[property].type = fbx_property_type_by_name(ref_to_type.string,
                                                           ref_to_type.length);
 
-    properties[property].name =
-      fbx_importer_intern_a_string_from_ref(importer, ref_to_name);
+    properties[property].name = fbx_importer_intern_a_string_from_ref(importer,
+                                                                      ref_to_name);
 
     /* Appears to hint the sub-type? */
     fbx_ref_to_data_t ref_to_hint;
     fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_hint);
 
+  #if 0
     if (ref_to_hint.length > 0) {
-      properties[property].hint =
-        fbx_importer_intern_a_string_from_ref(importer, ref_to_hint);
+      properties[property].hint = fbx_importer_intern_a_string_from_ref(importer,
+                                                                        ref_to_hint);
     } else {
       properties[property].hint = NULL;
     }
+  #endif
 
     fbx_ref_to_data_t ref_to_flags;
     fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_flags);
@@ -1937,7 +1967,7 @@ static fbx_bool_t fbx_process_a_header_extension_node(fbx_importer_t *importer,
   return FBX_TRUE;
 }
 
-static fbx_vec3_t fbx_basis_from_axis_and_sign(fbx_int32_t axis,
+static fbx_vec3_t fbx_vector_from_axis_and_sign(fbx_int32_t axis,
                                                fbx_int32_t sign)
 {
   switch (axis) {
@@ -1972,17 +2002,18 @@ static fbx_bool_t fbx_process_a_global_settings_node(fbx_importer_t *importer,
   const fbx_int32_t up_axis = up_axis_property->value.as_an_integer;
   const fbx_int32_t up_axis_sign = up_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.up = fbx_basis_from_axis_and_sign(up_axis, up_axis_sign);
+  importer->fbx->basis.up = fbx_vector_from_axis_and_sign(up_axis, up_axis_sign);
 
   const fbx_int32_t front_axis = front_axis_property->value.as_an_integer;
   const fbx_int32_t front_axis_sign = front_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.forward = fbx_basis_from_axis_and_sign(front_axis, !front_axis_sign);
+  /* We flip the sign since the "front axis" points towards the screen. */
+  importer->fbx->basis.forward = fbx_vector_from_axis_and_sign(front_axis, !front_axis_sign);
 
   const fbx_int32_t coord_axis = coord_axis_property->value.as_an_integer;
   const fbx_int32_t coord_axis_sign = coord_axis_sign_property->value.as_an_integer;
 
-  importer->fbx->basis.right = fbx_basis_from_axis_and_sign(coord_axis, coord_axis_sign);
+  importer->fbx->basis.right = fbx_vector_from_axis_and_sign(coord_axis, coord_axis_sign);
 
   /* HACK(mtwilliams): Assume origin at (0, 0, 0). */
   importer->fbx->origin = { 0.f, 0.f, 0.f };
@@ -2065,8 +2096,8 @@ static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
     }                                                                 \
   }
 
-static fbx_bool_t fbx_reify_a_model(fbx_importer_t *importer,
-                                    fbx_node_t *node)
+static void *fbx_reify_a_model(fbx_importer_t *importer,
+                               fbx_node_t *node)
 {
   const fbx_template_t *base = importer->model_template;
 
@@ -2098,13 +2129,13 @@ static fbx_bool_t fbx_reify_a_model(fbx_importer_t *importer,
   // Inheritance
    // Shove into `fbx_model_t` and fixup after reification?
 
-  return FBX_TRUE;
+  return (void *)1;
 }
 
-static fbx_bool_t fbx_reify_a_mesh(fbx_importer_t *importer,
-                                   fbx_node_t *node)
+static void *fbx_reify_a_mesh(fbx_importer_t *importer,
+                              fbx_node_t *node)
 {
-  return FBX_TRUE;
+  return (void *)1;
 }
 
 /* TODO(mtwilliams): Object indirection. */
@@ -2125,25 +2156,30 @@ static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
   fbx_uint64_t id;
   fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id);
 
-#if 0
   fbx_ref_to_data_t ref_to_name_and_class;
   fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_name_and_class);
 
   fbx_ref_to_data_t ref_to_sub_class;
   fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_sub_class);
-#endif
 
   object->id = id;
 
+  /* Rather than relying on the hard to decipher type and sub-type strings, we
+     guess the type from the node's name. This appears to work well enough. */
   if (strcmp(node->name, "Model") == 0) {
     object->type = FBX_MODEL;
+    object->reified = fbx_reify_a_model(importer, node);
   } else if (strcmp(node->name, "Geometry") == 0) {
     object->type = FBX_MESH;
+    object->reified = fbx_reify_a_mesh(importer, node);
   } else {
     object->type = FBX_UNKNOWN;
+    object->reified = NULL;
+    return object;
   }
 
-  object->reified = NULL;
+  if (!object->reified)
+    FBX_PANIC("Reification failed.");
 
   return object;
 }
