@@ -1227,16 +1227,22 @@ static fbx_bool_t fbx_extract_a_datum_typed(fbx_datum_type_t type,
 
 typedef enum fbx_property_type {
   FBX_COMPOUND_PROPERTY = 0xe79b2efc,
+  FBX_OBJECT_PROPERTY   = 0xb8c60cba,
   FBX_ENUM_PROPERTY     = 0x816cb000,
   FBX_BOOLEAN_PROPERTY  = 0xc894953d,
   FBX_INTEGER_PROPERTY  = 0x95e97e5e,
   FBX_FLOAT_PROPERTY    = 0xa6c45d85,
   FBX_DOUBLE_PROPERTY   = 0xa0eb0f08,
+  FBX_NUMBER_PROPERTY   = 0x61e9eac0,
   FBX_STRING_PROPERTY   = 0x84006183,
   FBX_TIME_PROPERTY     = 0xc1d8710b,
   FBX_DATETIME_PROPERTY = 0x9bec7490,
-  FBX_RGB_PROPERTY      = 0xff873b9b
+  FBX_VECTOR_PROPERTY   = 0x53b2b785,
+  FBX_COLOR_PROPERTY    = 0xe5b43cf8
 } fbx_property_type_t;
+
+/* TODO(mtwilliams): Verify that "Lcl Translation/Rotation/Scaling" are
+   unscaled three-dimensional vectors. */
 
 static fbx_property_type_t fbx_property_type_by_name(const char *name,
                                                      size_t length)
@@ -1248,6 +1254,17 @@ static fbx_property_type_t fbx_property_type_by_name(const char *name,
 
   for (const fbx_uint8_t *I = start; I != end; ++I)
     hash = (hash ^ *I) * 16777619ul;
+
+  switch (hash) {
+    /* Translation, rotation, and scaling are "cast" to a three-dimensional
+       vector type instead of being special cased. */
+    case 0x519a291f: case 0xffcc7052: case 0x679a6399:
+      return FBX_VECTOR_PROPERTY;
+
+    /* There appear to be two distinct color types without difference. */
+    case 0xe5b43cf8: case 0xff873b9b:
+      return FBX_COLOR_PROPERTY;
+  }
 
   return (fbx_property_type_t)hash;
 }
@@ -1263,7 +1280,8 @@ static const char *fbx_property_type_to_name(fbx_property_type_t type) {
     case FBX_STRING_PROPERTY: return "String";
     case FBX_TIME_PROPERTY: return "Time";
     case FBX_DATETIME_PROPERTY: return "DateTime";
-    case FBX_RGB_PROPERTY: return "RGB";
+    case FBX_VECTOR_PROPERTY: return "Vector";
+    case FBX_COLOR_PROPERTY: return "Color";
   }
 
   return NULL;
@@ -1289,8 +1307,11 @@ typedef struct fbx_property {
 
   union {
     fbx_ref_to_data_t as_a_ref;
+    fbx_bool_t as_a_boolean;
     fbx_int32_t as_an_integer;
     fbx_real64_t as_a_number;
+    fbx_vec3_t as_a_vector;
+    fbx_color_t as_a_color;
   } value;
 } fbx_property_t;
 
@@ -1635,8 +1656,18 @@ static fbx_bool_t fbx_extract_any_properties(fbx_importer_t *importer,
       case FBX_COMPOUND_PROPERTY:
         break;
 
-      case FBX_STRING_PROPERTY:
-        fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &properties[property].value.as_a_ref);
+      case FBX_OBJECT_PROPERTY:
+        break;
+
+      case FBX_ENUM_PROPERTY:
+        fbx_extract_a_datum_s(FBX_INT32_DATUM, cursor, &properties[property].value.as_an_integer);
+        break;
+
+      case FBX_BOOLEAN_PROPERTY:
+        /* Booleans properties are stored using integer datums... yeah. */
+        fbx_int32_t as_an_integer;
+        fbx_extract_a_datum_s(FBX_INT32_DATUM, cursor, &as_an_integer);
+        properties[property].value.as_a_boolean = !!as_an_integer;
         break;
 
       case FBX_INTEGER_PROPERTY:
@@ -1653,6 +1684,31 @@ static fbx_bool_t fbx_extract_any_properties(fbx_importer_t *importer,
         fbx_real64_t as_a_real64;
         fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &as_a_real64);
         properties[property].value.as_a_number = as_a_real64;
+        break;
+
+      case FBX_STRING_PROPERTY:
+        fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &properties[property].value.as_a_ref);
+        break;
+
+      case FBX_VECTOR_PROPERTY:
+        fbx_real64_t x, y, z;
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &x);
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &y);
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &z);
+        properties[property].value.as_a_vector.x = fbx_real32_t(x);
+        properties[property].value.as_a_vector.y = fbx_real32_t(y);
+        properties[property].value.as_a_vector.z = fbx_real32_t(z);
+        break;
+
+      case FBX_COLOR_PROPERTY:
+        fbx_real64_t r, g, b;
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &r);
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &g);
+        fbx_extract_a_datum_s(FBX_REAL64_DATUM, cursor, &b);
+        properties[property].value.as_a_color.r = fbx_real32_t(r);
+        properties[property].value.as_a_color.g = fbx_real32_t(g);
+        properties[property].value.as_a_color.b = fbx_real32_t(b);
+        properties[property].value.as_a_color.a = 1.f;
         break;
     }
 
