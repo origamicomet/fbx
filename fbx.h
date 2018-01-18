@@ -1518,10 +1518,6 @@ static int fbx__zlib_inflate(const void *in, fbx_size_t in_sz,
  * |____/|__,|_| |__,|
  */
 
-/* TODO(mtwilliams): Templates. */
-/* TODO(mtwilliams): Use templates to set defaults. */
-/* TODO(mtwilliams): Automatically associate properties with nodes. */
-
 typedef enum fbx_datum_type {
   FBX_UNKNOWN_DATUM = 0,
 
@@ -1881,41 +1877,23 @@ static fbx_property_type_t fbx_property_type_by_name(const char *name,
   const fbx_uint8_t *start = (const fbx_uint8_t *)name;
   const fbx_uint8_t *end = start + length;
 
+  /* Hash with Fowler–Noll–Vo's Hash (FNV-1a). */
   fbx_uint32_t hash = 2166136261ul;
-
   for (const fbx_uint8_t *I = start; I != end; ++I)
     hash = (hash ^ *I) * 16777619ul;
 
+  /* Remap certain hashes to types. */
   switch (hash) {
-    /* Translation, rotation, and scaling are "cast" to a three-dimensional
+    /* Translation, rotation, and scaling are remapped to the three-dimensional
        vector type instead of being special cased. */
     case 0x519a291f: case 0xffcc7052: case 0x679a6399:
       return FBX_VECTOR_PROPERTY;
-
     /* There appear to be two distinct color types without difference. */
     case 0xe5b43cf8: case 0xff873b9b:
       return FBX_COLOR_PROPERTY;
   }
 
   return (fbx_property_type_t)hash;
-}
-
-static const char *fbx_property_type_to_name(fbx_property_type_t type) {
-  switch (type) {
-    case FBX_COMPOUND_PROPERTY: return "Compound";
-    case FBX_ENUM_PROPERTY: return "Enum";
-    case FBX_BOOLEAN_PROPERTY: return "Boolean";
-    case FBX_INTEGER_PROPERTY: return "Integer";
-    case FBX_FLOAT_PROPERTY: return "Float";
-    case FBX_DOUBLE_PROPERTY: return "Double";
-    case FBX_STRING_PROPERTY: return "String";
-    case FBX_TIME_PROPERTY: return "Time";
-    case FBX_DATETIME_PROPERTY: return "DateTime";
-    case FBX_VECTOR_PROPERTY: return "Vector";
-    case FBX_COLOR_PROPERTY: return "Color";
-  }
-
-  return NULL;
 }
 
 typedef enum fbx_property_flag {
@@ -1971,10 +1949,8 @@ typedef struct fbx_node {
 
   /* Parent node. */
   struct fbx_node *parent;
-
   /* First child. */
   struct fbx_node *children;
-
   /* Next sibling, i.e. next child of parent. */
   struct fbx_node *sibling;
 } fbx_node_t;
@@ -2006,8 +1982,6 @@ static fbx_node_t *fbx_node_child_by_name(fbx_node_t *node,
   if (!(Child = fbx_node_child_by_name(Node, Name))) { \
     return FBX_FALSE;                                  \
   }
-
-/* TODO(mtwilliams): Build hash tables to reduce cost of looking up defaults. */
 
 typedef struct fbx_template {
   const char *name;
@@ -2429,6 +2403,13 @@ static fbx_bool_t fbx_extract_a_node(fbx_importer_t *importer,
 
     /* Extract properties if any exist. */
     fbx_extract_any_properties(importer, node);
+  } else {
+    /* No children. */
+    node->children = NULL;
+
+    /* So definitely no properties. */
+    node->properties = NULL;
+    node->num_of_properties = 0;
   }
 
   /* Skip the sentinel. */
@@ -2440,9 +2421,7 @@ static fbx_bool_t fbx_extract_a_node(fbx_importer_t *importer,
 /* TODO(mtwilliams): Replace `fbx_panic` with logging functionality tied to
    importer or entire library. */
 
-/* Free backing memory used to constitute the internal node hierarchy. */
-/* Validate and clean up data. */
- /* Includes triangulation the like. */
+/* TODO(mtwilliams): Use `setjmp` and `longjmp` to easily early out? */
 
 static fbx_bool_t fbx_importer_extract(fbx_importer_t *importer) {
   fbx_node_t **node = &importer->nodes->children;
@@ -2577,21 +2556,24 @@ static fbx_bool_t fbx_process_a_scene_info_node(fbx_importer_t *importer,
 
   if (app_vendor_property = fbx_node_property_by_name(scene_info_node, "LastSaved|ApplicationVendor")) {
     importer->fbx->tool.vendor =
-      fbx_importer_intern_a_string_from_ref(importer, app_vendor_property->value.as_a_ref);
+      fbx_importer_intern_a_string_from_ref(importer,
+                                            app_vendor_property->value.as_a_ref);
   } else {
     importer->fbx->tool.vendor = importer->an_empty_string;
   }
 
   if (app_name_property = fbx_node_property_by_name(scene_info_node, "LastSaved|ApplicationName")) {
     importer->fbx->tool.name =
-      fbx_importer_intern_a_string_from_ref(importer, app_name_property->value.as_a_ref);
+      fbx_importer_intern_a_string_from_ref(importer,
+                                            app_name_property->value.as_a_ref);
   } else {
     importer->fbx->tool.name = importer->an_empty_string;
   }
 
   if (app_version_property = fbx_node_property_by_name(scene_info_node, "LastSaved|ApplicationVersion")) {
     importer->fbx->tool.version =
-      fbx_importer_intern_a_string_from_ref(importer, app_version_property->value.as_a_ref);
+      fbx_importer_intern_a_string_from_ref(importer,
+                                            app_version_property->value.as_a_ref);
   } else {
     importer->fbx->tool.version = importer->an_empty_string;
   }
@@ -2611,7 +2593,8 @@ static fbx_bool_t fbx_process_a_creator_node(fbx_importer_t *importer,
   fbx_ref_to_data_t ref_to_exporter;
   fbx_extract_a_datum_from_node_s(FBX_STRING_DATUM, creator_node, &ref_to_exporter);
 
-  importer->fbx->exporter.name = fbx_importer_intern_a_string_from_ref(importer, ref_to_exporter);
+  importer->fbx->exporter.name =
+    fbx_importer_intern_a_string_from_ref(importer, ref_to_exporter);
 
   return FBX_TRUE;
 }
@@ -2960,6 +2943,8 @@ static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
   }
 
   if (importer->is_basically_empty) {
+    /* Quickly setup an empty scene and early out. */
+
     importer->fbx->scene.objects = NULL;
     importer->fbx->scene.num_of_objects = 0;
 
@@ -2999,6 +2984,10 @@ static fbx_bool_t fbx_importer_run(fbx_importer_t *importer) {
 
   /* Walk internal representation to process information into structures. */
   fbx_importer_process(importer);
+
+  /* Free backing memory used to constitute the internal node hierarchy. */
+  /* Validate and clean up data. */
+   /* Includes triangulation the like. */
 
   return FBX_TRUE;
 }
