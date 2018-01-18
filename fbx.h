@@ -579,6 +579,17 @@ FBX_END_EXTERN_C
   #include <memory.h>
 #endif
 
+/* Default to safer inflation and deflation that checks for errors. Error
+   handling can affect performance and relies on `setjmp`, but is better than
+   crashing! */
+#ifndef FBX__ZLIB_SAFE
+  #define FBX__ZLIB_SAFE 1
+#endif
+
+#ifdef FBX__ZLIB_SAFE
+  #include <setjmp.h>
+#endif
+
 /*  _____ _   _ _ _ _
  * |  |  | |_|_| |_| |_ _ _
  * |  |  |  _| | | |  _| | |
@@ -1033,6 +1044,473 @@ fbx_bool_t fbx_stream_read_uint64_as_uint32(fbx_stream_t *stream, fbx_uint32_t *
   if (!fbx_stream_read_uint64_as_uint32(Stream, Value)) { \
     return FBX_FALSE;                                     \
   }
+
+/*                                              
+ *  _____                               _         
+ * |     |___ _____ ___ ___ ___ ___ ___|_|___ ___ 
+ * |   --| . |     | . |  _| -_|_ -|_ -| | . |   |
+ * |_____|___|_|_|_|  _|_| |___|___|___|_|___|_|_|
+ *                 |_|                            
+ */
+
+#ifdef FBX_USE_EXTERNAL_COMPRESSION
+  
+#ifndef fbx__zlib_inflate
+  #error ("You must define `fbx__zlib_inflate` if using an external compression library!")
+#endif
+
+#ifndef fbx__zlib_deflate
+  #error ("You must define `fbx__zlib_deflate` if using an external compression library!")
+#endif
+
+#else
+
+/* https://tools.ietf.org/html/rfc1950 */
+/* https://tools.ietf.org/html/rfc1951 */
+
+fbx_uint32_t fbx__zlib_adler32(const void *data, fbx_size_t length)
+{
+  const fbx_uint8_t *D = (const fbx_uint8_t *)data;
+
+  fbx_uint32_t s1 = 1, s2 = 0;
+
+  while (length > 0) {
+    /* We can defer modulo for quite a while. See Wikipedia. */
+    fbx_uint32_t k = (length < 5552) ? length : 5552;
+    
+    /* Unrolled summation. */
+    for (fbx_size_t i = k / 16; i; --i, D += 16) {
+      s1 += D[0];  s2 += s1; s1 += D[1];  s2 += s1;
+      s1 += D[2];  s2 += s1; s1 += D[3];  s2 += s1;
+      s1 += D[4];  s2 += s1; s1 += D[5];  s2 += s1;
+      s1 += D[6];  s2 += s1; s1 += D[7];  s2 += s1;
+      s1 += D[8];  s2 += s1; s1 += D[9];  s2 += s1;
+      s1 += D[10]; s2 += s1; s1 += D[11]; s2 += s1;
+      s1 += D[12]; s2 += s1; s1 += D[13]; s2 += s1;
+      s1 += D[14]; s2 += s1; s1 += D[15]; s2 += s1;
+    }
+
+    /* Handle leftovers. */
+    for (fbx_size_t i = k % 16; i; --i) {
+      s1 += *D++; s2 += s1;
+    }
+
+    s1 %= 65521;
+    s2 %= 65521;
+
+    length -= k;
+  }
+
+  return (s2 << 16) | s1;
+}
+
+typedef struct fbx__zlib_huffman {
+  fbx_uint16_t counts[16];
+  fbx_uint16_t code_to_symbol[288];
+} fbx__zlib_huffman_t;
+
+static void fbx__zlib_build_fixed_huffman_trees(fbx__zlib_huffman_t *l_tree,
+                                                fbx__zlib_huffman_t *d_tree)
+{
+  /*
+   * Build length and literal tree.
+   */
+
+  for (unsigned i = 0; i < 7; ++i) l_tree->counts[i] = 0;
+
+  l_tree->counts[7] = 24;
+  l_tree->counts[8] = 152;
+  l_tree->counts[9] = 112;
+
+  for (unsigned i = 0; i < 24; ++i) l_tree->code_to_symbol[i] = 256 + i;
+  for (unsigned i = 0; i < 144; ++i) l_tree->code_to_symbol[24 + i] = i;
+  for (unsigned i = 0; i < 8; ++i) l_tree->code_to_symbol[24 + 144 + i] = 280 + i;
+  for (unsigned i = 0; i < 112; ++i) l_tree->code_to_symbol[24 + 144 + 8 + i] = 144 + i;
+
+  /*
+   * Build distance tree.
+   */
+
+  for (unsigned i = 0; i < 5; ++i) d_tree->counts[i] = 0;
+  
+  d_tree->counts[5] = 32;
+  
+  for (unsigned i = 0; i < 32; ++i) d_tree->code_to_symbol[i] = i;
+}
+
+static void fbx__zlib_build_huffman_tree(fbx__zlib_huffman_t *t,
+                                         const fbx_uint8_t *lengths,
+                                         unsigned n)
+{
+  /* Count number of codes bucketed by length. */
+  for (unsigned i = 0; i < 16; ++i) t->counts[i] = 0;
+  for (unsigned i = 0; i < n; ++i) t->counts[lengths[i]]++;
+
+  /* Zero length codes can't be encountered. */
+  t->counts[0] = 0;
+
+  unsigned offsets[16];
+
+  /* Compute offset table for distribution sort. */
+  for (unsigned sum = 0, i = 0; i < 16; ++i) {
+    offsets[i] = sum;
+    sum += t->counts[i];
+  }
+
+  /* Create code to symbol translation table. */
+  for (unsigned i = 0; i < n; ++i)
+    if (lengths[i])
+      t->code_to_symbol[offsets[lengths[i]]++] = i;
+}
+
+typedef struct fbx__zlib_inflater {
+  const fbx_uint8_t *in;
+  fbx_size_t left;
+
+  fbx_uint8_t *out;
+  fbx_size_t room;
+
+  fbx_uint8_t byte;
+  fbx_size_t bits;
+
+#ifdef FBX__ZLIB_SAFE
+  jmp_buf error;
+#endif
+} fbx__zlib_inflater_t;
+
+#define FBX__ZLIB_OK           (0)
+#define FBX__ZLIB_EMETHOD     -(1)
+#define FBX__ZLIB_EWINDOW     -(2)
+#define FBX__ZLIB_ESPACE      -(3)
+#define FBX__ZLIB_ESPACE      -(4)
+#define FBX__ZLIB_EBLOCK      -(5)
+#define FBX__ZLIB_EDICTIONARY -(6)
+#define FBX__ZLIB_EDATA       -(7)
+#define FBX__ZLIB_ECHECKSUM   -(8)
+
+static fbx_uint8_t fbx__zlib_inflate_get_next_byte(fbx__zlib_inflater_t *I)
+{
+#ifdef FBX__ZLIB_SAFE
+  if (!I->left)
+    longjmp(I->error, FBX__ZLIB_EDATA);
+#endif
+  return I->left--, *I->in++;
+}
+
+static unsigned fbx__zlib_inflate_get_next_bit(fbx__zlib_inflater_t *I)
+{
+  unsigned bit;
+
+  if (!I->bits--) {
+    I->byte = fbx__zlib_inflate_get_next_byte(I);
+    I->bits = 7;
+  }
+
+  bit = I->byte & 1;
+  I->byte >>= 1;
+
+  return bit;
+}
+
+static unsigned fbx__zlib_inflate_get_bits(fbx__zlib_inflater_t *I,
+                                           fbx_size_t n)
+{
+  unsigned v = 0;
+  
+  for (unsigned mask = 1, limit = 1 << n; mask < limit; mask <<= 1)
+    v += fbx__zlib_inflate_get_next_bit(I) ? mask : 0;
+  
+  return v;
+}
+
+static void fbx__zlib_inflate_put(fbx__zlib_inflater_t *I, fbx_uint8_t byte)
+{
+#ifdef FBX__ZLIB_SAFE
+  if (!I->room)
+    longjmp(I->error, FBX__ZLIB_ESPACE);
+#endif
+  *I->out++ = byte;
+  I->room--;
+}
+
+static void fbx__zlib_inflate_repeat(fbx__zlib_inflater_t *I, unsigned length, unsigned distance)
+{
+#ifdef FBX__ZLIB_SAFE
+  if (length > I->room)
+    longjmp(I->error, FBX__ZLIB_ESPACE);
+#endif
+
+  const fbx_uint8_t *referenced = I->out - distance;
+
+  while (length) {
+    *I->out++ = *referenced++;
+    I->room--;
+    --length;
+  }
+}
+
+static void fbx__zlib_inflate_uncompressed_block(fbx__zlib_inflater_t *I)
+{
+  fbx_uint16_t length, complement;
+ 
+  /* Read length of block and its one's complement, making sure to skip any
+     remaining bits to align to a byte boundary. */
+  length = fbx__zlib_inflate_get_next_byte(I) | 256 * fbx__zlib_inflate_get_next_byte(I);
+  complement = fbx__zlib_inflate_get_next_byte(I) | 256 * fbx__zlib_inflate_get_next_byte(I);
+
+#if FBX__ZLIB_SAFE
+  if (length != ~complement)
+    longjmp(I->error, FBX__ZLIB_EBLOCK);
+#endif
+
+  while (length--) {
+  #if FBX__ZLIB_SAFE
+    if (!I->left)
+      longjmp(I->error, FBX__ZLIB_EDATA);
+    if (!I->room)
+      longjmp(I->error, FBX__ZLIB_ESPACE);
+  #endif
+
+    I->left--;
+    I->room--;
+
+    *I->out++ = *I->in++;
+  }
+
+  /* Since we skipped any remaining bits to align to a byte boundary, we
+     preemptively get the next eight bits simplify `fbx__zlib_inflate_get_next_bit`. */
+  I->byte = fbx__zlib_inflate_get_next_byte(I);
+  I->bits = 8;
+}
+
+static unsigned fbx__zlib_inflate_decode_symbol(fbx__zlib_inflater_t *I,
+                                                const fbx__zlib_huffman_t *t)
+{
+  int sum = 0, current = 0, length = 0;
+
+  do {
+    current = 2 * current + fbx__zlib_inflate_get_next_bit(I);
+
+    length += 1;
+
+    sum += t->counts[length];
+    current -= t->counts[length];
+  } while (current >= 0);
+
+  return t->code_to_symbol[sum + current];
+}
+
+/* Special ordering of code length codes. */
+static const fbx_uint8_t fbx__zlib_clc_order[] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+
+static void fbx__zlib_decode_huffman_trees(fbx__zlib_inflater_t *I,
+                                           fbx__zlib_huffman_t *l_tree,
+                                           fbx__zlib_huffman_t *d_tree)
+{
+  unsigned n_l, n_d, n_c;
+
+  n_l = fbx__zlib_inflate_get_bits(I, 5) + 257;
+  n_d = fbx__zlib_inflate_get_bits(I, 5) + 1;
+  n_c = fbx__zlib_inflate_get_bits(I, 4) + 4;
+
+  fbx_uint8_t lengths[288 + 32];
+
+  /* Read in code lengths for the Huffman tree used to encode the code lengths
+    for the following trees. */
+  for (unsigned i = 0; i < n_c; ++i)
+    lengths[fbx__zlib_clc_order[i]] = fbx__zlib_inflate_get_bits(I, 3);
+  for (unsigned i = n_c; i < 19; ++i)
+    lengths[fbx__zlib_clc_order[i]] = 0;
+
+  /* Build tree used to encode code lengths for following trees. */
+  fbx__zlib_huffman_t cl_tree;
+  fbx__zlib_build_huffman_tree(&cl_tree, lengths, 19);
+
+  /* Decode code lengths for the dynamic trees. */
+  for (unsigned n = 0; n < (n_l + n_d);) {
+    unsigned symbol = fbx__zlib_inflate_decode_symbol(I, &cl_tree);
+    switch (symbol) {
+      case 16: { /* Copy the previous code length 3-6 times. */
+        const fbx_uint8_t previous = lengths[n-1];
+        for (unsigned i = fbx__zlib_inflate_get_bits(I, 2) + 3; i; --i)
+          lengths[n++] = previous;
+      } break;
+      case 17: { /* Repeat a code length of 0 for 3-10 times. */
+        for (unsigned i = fbx__zlib_inflate_get_bits(I, 3) + 3; i; --i)
+          lengths[n++] = 0;
+      } break;
+      case 18: { /* Repeat a code length of 0 for 11-138 times. */
+        for (unsigned i = fbx__zlib_inflate_get_bits(I, 7) + 11; i; --i)
+          lengths[n++] = 0;
+      } break;
+      default: { /* Represent code lengths of 0-15. */
+        lengths[n++] = symbol;
+      }
+    }
+  }
+
+  /* Build literal/length tree. */
+  fbx__zlib_build_huffman_tree(l_tree, &lengths[0], n_l);
+
+  /* Build distance tree. */
+  fbx__zlib_build_huffman_tree(d_tree, &lengths[n_l], n_d);
+}
+
+/* Lookup tables for length and distance. */
+static const fbx_uint8_t fbx__zlib_length_bits[] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5 };
+static const fbx_uint16_t fbx_zlib__length_base[] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const fbx_uint8_t fbx__zlib_distance_bits[] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+static const fbx_uint16_t fbx__zlib_distance_base[] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+
+static void fbx__zlib_inflate_huffman_block(fbx__zlib_inflater_t *I,
+                                            fbx__zlib_huffman_t *l_tree,
+                                            fbx__zlib_huffman_t *d_tree)
+{
+  unsigned symbol, length, distance;
+
+decode:
+  symbol = fbx__zlib_inflate_decode_symbol(I, l_tree);
+
+  switch (symbol) {
+    case 256: /* End of block. */
+      return;
+
+    case 257: case 258: case 259: case 260: case 261: case 262: case 263:
+    case 264: case 265: case 266: case 267: case 268: case 269: case 270:
+    case 271: case 272: case 273: case 274: case 275: case 276: case 277:
+    case 278: case 279: case 280: case 281: case 282: case 283: case 284:
+    case 285: /* Length-distance pair. */
+      length = fbx__zlib_inflate_get_bits(I, fbx__zlib_length_bits[symbol-257]) + fbx_zlib__length_base[symbol-257];
+      symbol = fbx__zlib_inflate_decode_symbol(I, d_tree);
+      distance = fbx__zlib_inflate_get_bits(I, fbx__zlib_distance_bits[symbol]) + fbx__zlib_distance_base[symbol];
+      fbx__zlib_inflate_repeat(I, length, distance);
+      goto decode;
+
+    default: /* Literal. */
+      fbx__zlib_inflate_put(I, symbol);
+      goto decode;
+  }
+}
+
+static void fbx__zlib_inflate_fixed_huffman_block(fbx__zlib_inflater_t *I)
+{
+  /* Build length/literal and distance trees used by fixed blocks. */
+  fbx__zlib_huffman_t l_tree, d_tree;
+  fbx__zlib_build_fixed_huffman_trees(&l_tree, &d_tree);
+
+  /* Inflate block using trees. */
+  fbx__zlib_inflate_huffman_block(I, &l_tree, &d_tree);
+}
+
+static void fbx__zlib_inflate_dynamic_huffman_block(fbx__zlib_inflater_t *I)
+{
+  /* Decode length/literal and distances trees. */
+  fbx__zlib_huffman_t l_tree, d_tree;
+  fbx__zlib_decode_huffman_trees(I, &l_tree, &d_tree);
+
+  /* Inflate block using trees. */
+  fbx__zlib_inflate_huffman_block(I, &l_tree, &d_tree);
+}
+
+/* TODO(mtwilliams): Assert that `CMF * 256 + FLG` is a multiple of 31`. */
+
+static int fbx__zlib_inflate(const void *in, fbx_size_t in_sz,
+                             void *out, fbx_size_t out_sz)
+{
+  fbx__zlib_inflater_t I;
+
+  I.in = (const fbx_uint8_t *)in; I.left = in_sz;
+  I.out = (fbx_uint8_t *)out; I.room = out_sz;
+  I.byte = 0; I.bits = 0;
+
+#if FBX__ZLIB_SAFE
+  if (int error = setjmp(I.error))
+    return error;
+#endif
+
+  unsigned c_method, c_info;
+
+  c_method = fbx__zlib_inflate_get_bits(&I, 4);
+  c_info = fbx__zlib_inflate_get_bits(&I, 4);
+
+  if (c_method != 8)
+    /* We only support DEFLATE. */
+    return FBX__ZLIB_EMETHOD;
+
+  if (c_info > 7)
+    /* We only support windows up to 32KiB. */
+    return FBX__ZLIB_EWINDOW;
+
+  unsigned f_check, f_dictionary, f_level;
+
+  f_check = fbx__zlib_inflate_get_bits(&I, 5);
+  f_dictionary = fbx__zlib_inflate_get_bits(&I, 1);
+  f_level = fbx__zlib_inflate_get_bits(&I, 2);
+
+  if (f_dictionary != 0)
+    /* We don't support preset dictionaries. */
+    return FBX__ZLIB_EDICTIONARY;
+
+  for (;;) {
+    unsigned b_type, b_final;
+
+    b_final = fbx__zlib_inflate_get_bits(&I, 1);
+    b_type = fbx__zlib_inflate_get_bits(&I, 2);
+
+    switch (b_type) {
+      case 0: /* No compression. */
+        fbx__zlib_inflate_uncompressed_block(&I);
+        break;
+      case 1: /* Compressed with fixed Huffman codes. */
+        fbx__zlib_inflate_fixed_huffman_block(&I);
+        break;
+      case 2: /* Compressed with dynamic Huffman codes. */
+        fbx__zlib_inflate_dynamic_huffman_block(&I);
+        break;
+    #ifdef FBX__ZLIB_SAFE
+      case 3: /* Reserved; erroneous. */
+        return FBX__ZLIB_EBLOCK;
+    #endif
+    }
+
+    if (b_final)
+      /* Final block, fall through to check checksum. */
+      break;
+    
+  #if FBX__ZLIB_SAFE
+    if (!I.left)
+      /* Ran out of data before final block. */
+      return FBX__ZLIB_EDATA;
+  #endif
+  }
+
+  FILE *dump = fopen("mike", "wb");
+  fwrite(out, 1, out_sz - I.room, dump);
+  fclose(dump);
+
+#if FBX__ZLIB_SAFE
+  if (I.left < 4)
+    /* Not enough data left for checksum to be present. */
+    return FBX__ZLIB_EDATA;
+
+  fbx_uint32_t checksum, expected;
+
+  checksum = fbx__zlib_adler32(out, out_sz - I.room);
+
+  /* Checksum is in big endian. */
+  expected = ((const fbx_uint8_t *)I.in)[0] << 24
+           | ((const fbx_uint8_t *)I.in)[1] << 16
+           | ((const fbx_uint8_t *)I.in)[2] <<  8
+           | ((const fbx_uint8_t *)I.in)[3] <<  0;
+
+  if (checksum != expected)
+    return FBX__ZLIB_ECHECKSUM;
+#endif
+
+  return FBX__ZLIB_OK;
+}
+
+#endif
 
 /*  ____      _
  * |    \ ___| |_ ___
