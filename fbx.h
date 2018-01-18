@@ -447,8 +447,21 @@ typedef struct fbx_texture fbx_texture_t;
 
 typedef struct fbx_transform fbx_transform_t;
 
-typedef struct fbx_model fbx_model_t;
-typedef struct fbx_mesh fbx_mesh_t;
+typedef struct fbx_model {
+  /*! Position relative to parent. */
+  fbx_vec3_t position;
+  /*! Rotation relative to parent. */
+  fbx_quaternion_t rotation;
+  /*! Scale relative to parent. */
+  fbx_vec3_t scale;
+} fbx_model_t;
+
+typedef struct fbx_mesh {
+  fbx_uint32_t num_of_vertices;
+  fbx_uint32_t num_of_edges;
+  fbx_uint32_t num_of_faces;
+} fbx_mesh_t;
+
 typedef struct fbx_topology fbx_topology_t;
 typedef struct fbx_geometry fbx_geometry_t;
 
@@ -2767,10 +2780,97 @@ static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
     }                                                                 \
   }
 
+#define fbx_property_is_type_s(Type, Property) \
+  if (Property->type != Type) {                \
+    return FBX_FALSE;                          \
+  }
+
+static fbx_model_t *fbx_importer_alloc_a_model(fbx_importer_t *importer) {
+  fbx_model_t *model =
+    (fbx_model_t *)fbx_block_allocate_s(&importer->memory.permanent,
+                                        sizeof(fbx_model_t));
+  return model;
+}
+
+static fbx_mesh_t *fbx_importer_alloc_a_mesh(fbx_importer_t *importer) {
+  fbx_mesh_t *mesh =
+    (fbx_mesh_t *)fbx_block_allocate_s(&importer->memory.permanent,
+                                        sizeof(fbx_mesh_t));
+  return mesh;
+}
+
+/* TODO(mtwillaism): Extract information required for inverse kinematics. */
+/* TODO(mtwilliams): Constitute transform properly. */
+
+typedef enum fbx_order_of_rotation {
+  FBX_XYZ = 0,
+  FBX_XZY = 1,
+  FBX_YZX = 2,
+  FBX_YXZ = 3,
+  FBX_ZXY = 4,
+  FBX_ZYX = 5
+} fbx_order_of_rotation_t;
+
+/* PERF(mtwilliams): Analytically derive specialization for all variants? */
+
+fbx_quaternion_t fbx_quat_from_axis_angle(const fbx_vec3_t axis,
+                                          const fbx_real32_t angle)
+{
+  const fbx_real32_t sin_of_half_angle = sinf(angle * 0.5f);
+  const fbx_real32_t cos_of_half_angle = cosf(angle * 0.5f);
+
+  return {
+    sin_of_half_angle * axis.x,
+    sin_of_half_angle * axis.y,
+    sin_of_half_angle * axis.z,
+    cos_of_half_angle
+  };
+}
+
+fbx_quaternion_t fbx_quat_mul(const fbx_quaternion_t lhs,
+                              const fbx_quaternion_t rhs)
+{
+  return {
+    lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
+    lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
+    lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
+    lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z
+  };
+}
+
+static fbx_quaternion_t fbx_quat_from_order_and_angles(fbx_order_of_rotation_t order,
+                                                       const fbx_vec3_t angles)
+{
+  fbx_quaternion_t q[3];
+
+  q[0] = fbx_quat_from_axis_angle({ 1.f, 0.f, 0.f }, fbx_degrees_to_radians(angles.x));
+  q[1] = fbx_quat_from_axis_angle({ 0.f, 1.f, 0.f }, fbx_degrees_to_radians(angles.y));
+  q[2] = fbx_quat_from_axis_angle({ 0.f, 0.f, 2.f }, fbx_degrees_to_radians(angles.z));
+
+  unsigned i[3];
+
+  switch (order) {
+    case FBX_XYZ: i[0] = 0; i[1] = 1; i[2] = 2; break;
+    case FBX_XZY: i[0] = 0; i[1] = 2; i[2] = 1; break;
+    case FBX_YZX: i[0] = 1; i[1] = 2; i[2] = 0; break;
+    case FBX_YXZ: i[0] = 1; i[1] = 0; i[2] = 2; break;
+    case FBX_ZXY: i[0] = 2; i[1] = 0; i[2] = 1; break;
+    case FBX_ZYX: i[0] = 2; i[1] = 1; i[2] = 0; break;
+
+    default:
+      /* TODO(mtwilliams): Handle spheric rotation? */
+      FBX_PANIC("Unsupported rotation order.");
+  }
+
+  return fbx_quat_mul(fbx_quat_mul(q[i[0]], q[i[1]]), q[i[2]]);
+}
+
 static void *fbx_reify_a_model(fbx_importer_t *importer,
                                fbx_node_t *node)
 {
   const fbx_template_t *base = importer->model_template;
+
+  fbx_model_t *model = fbx_importer_alloc_a_model(importer);
 
   const fbx_property_t *local_translation_property,
                        *local_rotation_property,
@@ -2780,34 +2880,85 @@ static void *fbx_reify_a_model(fbx_importer_t *importer,
   fbx_property_or_default_by_name_s(base, node, "Lcl Rotation", local_rotation_property);
   fbx_property_or_default_by_name_s(base, node, "Lcl Scaling", local_scaling_property);
 
-  // Translation
-   // TranslationActive => Toggle
-   // TranslationMin and TranslationMax
-    // TranslationMin{X,Y,Z} and TranslationMax{X,Y,Z} => Toggle
-  // Rotation
-   // RotationActive => Toggle
-   // RotationOrder => Application of Euler angles. Only matters during construction.
-   // RotationMin and RotationMax
-    // RotationMin{X,Y,Z} and RotationMax{X,Y,Z} => Toggle
-  // Scaling
-   // ScalingActive => Toggle
-   // ScalingMin and ScalingMax
-    // ScalingMin{X,Y,Z} and ScalingMax{X,Y,Z} => Toggle
+  fbx_property_is_type_s(FBX_VECTOR_PROPERTY, local_translation_property);
+  fbx_property_is_type_s(FBX_VECTOR_PROPERTY, local_rotation_property);
+  fbx_property_is_type_s(FBX_VECTOR_PROPERTY, local_scaling_property);
 
-  // Show
-  // Freeze
-  // Visibility
-  // Inheritance
-   // Shove into `fbx_model_t` and fixup after reification?
+  model->position = local_translation_property->value.as_a_vector;
 
-  return (void *)1;
+  const fbx_property_t *order_of_rotation_property;
+  fbx_property_or_default_by_name_s(base, node, "RotationOrder", order_of_rotation_property);
+  fbx_property_is_type_s(FBX_ENUM_PROPERTY, order_of_rotation_property);
+
+  const fbx_order_of_rotation_t order_of_rotation =
+    fbx_order_of_rotation_t(order_of_rotation_property->value.as_an_integer);
+
+  model->rotation =
+    fbx_quat_from_order_and_angles(order_of_rotation,
+                                   local_rotation_property->value.as_a_vector);
+
+  model->scale = local_scaling_property->value.as_a_vector;
+
+  return (void *)model;
 }
 
 static void *fbx_reify_a_mesh(fbx_importer_t *importer,
                               fbx_node_t *node)
 {
-  return (void *)1;
+  const fbx_template_t *base = importer->geometry_template;
+
+  fbx_mesh_t *mesh = fbx_importer_alloc_a_mesh(importer);
+
+  /* TODO(mtwilliams): Check GeometryVersion? */
+
+  fbx_node_t *vertices_node,
+             *edges_node,
+             *polygon_vertex_index_node;
+
+  fbx_node_child_by_name_s(node, "Vertices", vertices_node);
+  fbx_node_child_by_name_s(node, "Edges", edges_node);
+  fbx_node_child_by_name_s(node, "PolygonVertexIndex", polygon_vertex_index_node);
+
+  fbx_data_t vertices;
+  fbx_extract_a_datum_from_node_s(FBX_REAL64_DATA, vertices_node, &vertices);
+
+  /* Vertices may be (and likely are) encoded so we need to decode them. */
+  fbx_decode_an_array_s(&vertices, &importer->memory.permanent);
+
+    /* Layer */
+   /* LayerElement */
+    /* Type */
+    /* TypedIndex */
+
+  /* LayerElement??? */
+   /* Version? */
+   /* Name */
+   /* MappingInformationType */
+   /* ReferenceInformationType */
+  /* LayerElementNormal */
+   /* Normals */
+   /* NormalsW */
+  /* LayerElementUV */
+   /* UV */
+   /* UVIndex */
+  /* LayerElementSmoothing */
+   /* Smoothing */
+  /* LayerElementMaterial */
+   /* Materials */
+
+  return (void *)mesh;
 }
+
+/* Features */
+ /* Transforms */
+  /* With contraints, including locking. */
+ /* Vertices, Edges, and Faces. */
+  /* Topology */
+ /* Bounding Boxes */
+  /* Computed? */
+ /* Normal, tangent, and binormal calculation. */
+  /* Or import. */
+  /* Smooth or not. */
 
 /* TODO(mtwilliams): Object indirection. */
  /* Need to map UIDs to `fbx_object_t *`. */
@@ -2864,6 +3015,25 @@ static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
   return object;
 }
 
+typedef enum fbx_type_of_connection {
+  FBX_OBJECT_TO_OBJECT     = 'OO',
+  FBX_OBJECT_TO_PROPERTY   = 'OP',
+  FBX_PROPERTY_TO_OBJECT   = 'PO',
+  FBX_PROPERTY_TO_PROPERTY = 'PP'
+} fbx_type_of_connection_t;
+
+/* PERF(mtwilliams): Use index make lookups cheaper. */
+
+static fbx_object_t *fbx_scene_object_by_id(fbx_scene_t *scene,
+                                            fbx_uint64_t id)
+{
+  for (fbx_uint32_t object = 0; object < scene->num_of_objects; ++object)
+    if (scene->objects[object]->id == id)
+      return scene->objects[object];
+
+  return NULL;
+}
+
 static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *importer,
                                                                fbx_node_t *root)
 {
@@ -2898,8 +3068,49 @@ static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *i
   for (fbx_node_t *object_node = objects_node->children; object_node; object_node = object_node->sibling)
     objects[reified++] = fbx_reify_an_object(importer, object_node);
 
-  // fbx_node_t *connections_node;
-  // fbx_node_child_by_name_s(root, "Connections", connections_node);
+  fbx_node_t *connections_node;
+  fbx_node_child_by_name_s(root, "Connections", connections_node);
+
+  for (fbx_node_t *connection_node = connections_node->children; connection_node; connection_node = connection_node->sibling) {
+    const void *cursor = connection_node->data;
+
+    fbx_ref_to_data_t ref_to_type;
+    fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_type);
+
+    const fbx_type_of_connection_t type =
+       fbx_type_of_connection_t(*((fbx_uint16_t *)ref_to_type.pointer));
+
+    fbx_uint64_t id_of_child;
+    fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id_of_child);
+
+    fbx_uint64_t id_of_parent;
+    fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id_of_parent);
+
+    switch (type) {
+      case FBX_OBJECT_TO_OBJECT: {
+        fbx_object_t *parent = fbx_scene_object_by_id(&importer->fbx->scene, 
+                                                      id_of_parent);
+
+        fbx_object_t *child = fbx_scene_object_by_id(&importer->fbx->scene, 
+                                                     id_of_child);
+      } break;
+
+      /* TODO(mtwilliams): Determine if more advanced features rely on these
+         types of connections. */
+    #if 0
+      case FBX_OBJECT_TO_PROPERTY: {
+        fbx_ref_to_data_t ref_to_property;
+        fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_property);
+      } break;
+
+      case FBX_PROPERTY_TO_OBJECT: {
+      } break;
+
+      case FBX_PROPERTY_TO_PROPERTY: {
+      } break;
+    #endif
+    }
+  }
 
   return FBX_TRUE;
 }
