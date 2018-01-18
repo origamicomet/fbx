@@ -1532,17 +1532,29 @@ typedef enum fbx_datum_type {
   FBX_REAL32_DATUM = 'F',
   FBX_REAL64_DATUM = 'D',
 
-  FBX_ARRAY_OF_BOOLEAN_DATUM = 'b',
-  FBX_ARRAY_OF_INT32_DATUM = 'i',
-  FBX_ARRAY_OF_INT64_DATUM = 'l',
-  FBX_ARRAY_OF_REAL32_DATUM = 'f',
-  FBX_ARRAY_OF_REAL64_DATUM = 'd',
+  FBX_BOOLEAN_DATA = 'b',
+  FBX_INT32_DATA = 'i',
+  FBX_INT64_DATA = 'l',
+  FBX_REAL32_DATA = 'f',
+  FBX_REAL64_DATA = 'd',
 
   FBX_STRING_DATUM = 'S',
   FBX_BINARY_DATUM = 'R'
 } fbx_datum_type_t;
 
-/* Reference to data attached to a node. */
+static fbx_size_t fbx_size_of_datum(fbx_datum_type_t type)
+{
+  switch (type) {
+    case FBX_BOOLEAN_DATUM: return 1;
+    case FBX_INT32_DATUM: return 4;
+    case FBX_INT64_DATUM: return 8;
+    case FBX_REAL32_DATUM: return 4;
+    case FBX_REAL64_DATUM: return 8;
+  }
+
+  return 0;
+}
+
 typedef struct fbx_ref_to_data {
   fbx_uint32_t length;
 
@@ -1552,6 +1564,40 @@ typedef struct fbx_ref_to_data {
     const char *string;
   };
 } fbx_ref_to_data_t;
+
+typedef enum fbx_data_encoding {
+  FBX_RAW        = 0,
+  FBX_COMPRESSED = 1
+} fbx_data_encoding_t;
+
+typedef struct fbx_data_t {
+  /* Indicates array encoding. */
+  fbx_data_encoding_t encoding;
+
+  /* Type of elements in array. */
+  fbx_datum_type_t type;
+
+  /* Number of elements in array. */
+  fbx_uint32_t count;
+  
+  union {
+    /* Untyped pointer to elements. */
+    const void *elements;
+
+    /* Typed pointers. */
+    const fbx_bool_t *ptr_to_booleans;
+    const fbx_int32_t *ptr_to_int32;
+    const fbx_int64_t *ptr_to_int64;
+    const fbx_real32_t *ptr_to_real32;
+    const fbx_real64_t *ptr_to_real64;
+  };
+
+  /* Pointer to raw data. */
+  const void *raw;
+
+  /* Size of raw data. */
+  fbx_uint32_t size;
+} fbx_data_t;
 
 typedef struct fbx_datum {
   union {
@@ -1567,11 +1613,119 @@ typedef struct fbx_datum {
     fbx_real32_t as_a_real32;
     fbx_real64_t as_a_real64;
     fbx_ref_to_data_t as_a_ref;
+    fbx_data_t as_an_array;
   };
 } fbx_datum_t;
 
 #define BUMP(Pointer, Count) \
   (void *)(fbx_uintptr_t(Pointer) + (Count))
+
+static fbx_bool_t fbx_extract_an_array(const void *cursor,
+                                       fbx_datum_t *datum,
+                                       const void **updated)
+{
+  /* Read in number of elements in array. */
+  const fbx_uint32_t count = *(fbx_uint32_t *)cursor; 
+  cursor = BUMP(cursor, 4);
+
+  /* Identify encoding. */
+  const fbx_uint32_t encoding = *(fbx_uint32_t *)cursor;
+  cursor = BUMP(cursor, 4);
+
+  /* Determine if array is encoded since they are handled differently. */
+  const fbx_bool_t encoded = (encoding != FBX_RAW);
+
+  fbx_uint32_t size_in_memory,
+               size_in_file;
+
+  /* Derive size in bytes from type and count. */
+  switch (datum->type) {
+    case FBX_BOOLEAN_DATA: size_in_memory = 1 * count; break;
+    case FBX_INT32_DATA: size_in_memory = 4 * count; break;
+    case FBX_INT64_DATA: size_in_memory = 8 * count; break;
+    case FBX_REAL32_DATA: size_in_memory = 4 * count; break;
+    case FBX_REAL64_DATA: size_in_memory = 8 * count; break;
+  }
+
+  /* Read in size in file if encoded, otherwise it's the same. */
+  size_in_file = encoded ? *(fbx_uint32_t *)cursor : size_in_memory;
+  cursor = BUMP(cursor, 4);
+
+  datum->as_an_array.encoding = fbx_data_encoding_t(encoding);
+
+  /* Derive type of elements. */
+  switch (datum->type) {
+    case FBX_BOOLEAN_DATA: datum->as_an_array.type = FBX_BOOLEAN_DATUM; break;
+    case FBX_INT32_DATA: datum->as_an_array.type = FBX_INT32_DATUM; break;
+    case FBX_INT64_DATA: datum->as_an_array.type = FBX_INT64_DATUM; break;
+    case FBX_REAL32_DATA: datum->as_an_array.type = FBX_REAL32_DATUM; break;
+    case FBX_REAL64_DATA: datum->as_an_array.type = FBX_REAL64_DATUM; break;
+  }
+
+  /* Copy count through. */
+  datum->as_an_array.count = count;
+
+  /* Regardless of encoding, we keep a pointer to the raw data. */
+  datum->as_an_array.raw = cursor;
+
+  /* As well as it's size. */
+  datum->as_an_array.size = size_in_file;
+
+  switch (encoding) {
+    case FBX_RAW:
+      /* We can directly reference data attached to the node. */
+      datum->as_an_array.elements = cursor;
+      *updated = BUMP(cursor, size_in_file);
+      return FBX_TRUE;
+
+    case FBX_COMPRESSED:
+      /* Data must be decompressed by caller. See `fbx_decode_an_array`. */
+      datum->as_an_array.elements = NULL;
+      *updated = BUMP(cursor, size_in_file);
+      return FBX_TRUE;
+
+    default:
+      /* Unknown or unsupported encoding. */
+      return FBX_FALSE;
+  }
+}
+
+static fbx_bool_t fbx_inflate_an_array(fbx_data_t *data,
+                                       fbx_block_t *block)
+{
+  const fbx_size_t size_afer_inflation =
+    fbx_size_of_datum(data->type) * data->count;
+
+  void *inflated =
+    fbx_block_allocate_s(block, size_afer_inflation);
+
+  data->elements = inflated;
+
+  return !fbx__zlib_inflate(data->raw, data->size,
+                            inflated, size_afer_inflation);
+}
+
+static fbx_bool_t fbx_decode_an_array(fbx_data_t *data,
+                                      fbx_block_t *block)
+{
+  switch (data->encoding) {
+    case FBX_RAW:
+      /* No need to decode. */
+      return FBX_TRUE;
+
+    case FBX_COMPRESSED:
+      return fbx_inflate_an_array(data, block);
+
+    default:
+      /* Unknown or unsupported encoding. */
+      return FBX_FALSE;
+  }
+}
+
+#define fbx_decode_an_array_s(Data, Block) \
+  if (!fbx_decode_an_array(Data, Block)) { \
+    return FBX_FALSE;                      \
+  }
 
 static fbx_bool_t fbx_extract_a_datum(const void *cursor,
                                       fbx_datum_t *datum,
@@ -1612,14 +1766,13 @@ static fbx_bool_t fbx_extract_a_datum(const void *cursor,
       *updated = BUMP(cursor, 8);
       return FBX_TRUE;
 
-  #if 0
-    /* Arrays of primitives */
-    case FBX_ARRAY_OF_BOOLEAN_DATUM: return fbx_process_an_array(importer, FBX_BOOLEAN_DATUM);
-    case FBX_ARRAY_OF_INT32_DATUM: return fbx_process_an_array(importer, FBX_INT32_DATUM);
-    case FBX_ARRAY_OF_INT64_DATUM: return fbx_process_an_array(importer, FBX_INT64_DATUM);
-    case FBX_ARRAY_OF_REAL32_DATUM: return fbx_process_an_array(importer, FBX_REAL32_DATUM);
-    case FBX_ARRAY_OF_REAL64_DATUM: return fbx_process_an_array(importer, FBX_REAL64_DATUM);
-  #endif
+    /* Arrays of primitives. */
+    case FBX_BOOLEAN_DATA:
+    case FBX_INT32_DATA:
+    case FBX_INT64_DATA:
+    case FBX_REAL32_DATA:
+    case FBX_REAL64_DATA:
+      return fbx_extract_an_array(cursor, datum, updated);
 
     /* Strings and binaries. */
     case FBX_STRING_DATUM:
@@ -1672,13 +1825,13 @@ static fbx_bool_t fbx_extract_a_datum_typed(fbx_datum_type_t type,
       *(fbx_real64_t *)extracted = datum.as_a_real64;
       return FBX_TRUE;
 
-  #if 0
-    case FBX_ARRAY_OF_BOOLEAN_DATUM: break;
-    case FBX_ARRAY_OF_INT32_DATUM: break;
-    case FBX_ARRAY_OF_INT64_DATUM: break;
-    case FBX_ARRAY_OF_REAL32_DATUM: break;
-    case FBX_ARRAY_OF_REAL64_DATUM: break;
-  #endif
+    case FBX_BOOLEAN_DATA:
+    case FBX_INT32_DATA:
+    case FBX_INT64_DATA:
+    case FBX_REAL32_DATA:
+    case FBX_REAL64_DATA:
+      *(fbx_data_t *)extracted = datum.as_an_array;
+      return FBX_TRUE;
 
     case FBX_STRING_DATUM:
     case FBX_BINARY_DATUM:
