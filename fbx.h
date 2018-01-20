@@ -1031,13 +1031,13 @@ static fbx_size_t fbx_file_stream_tell(fbx_file_stream_t *stream)
 static fbx_bool_t fbx_file_stream_seek(fbx_file_stream_t *stream,
                                        fbx_size_t offset)
 {
-  return !fseek(stream->handle, offset, SEEK_SET);
+  return !!!fseek(stream->handle, offset, SEEK_SET);
 }
 
 static fbx_bool_t fbx_file_stream_skip(fbx_file_stream_t *stream,
                                        fbx_size_t amount)
 {
-  return !fseek(stream->handle, amount, SEEK_CUR);
+  return !!!fseek(stream->handle, amount, SEEK_CUR);
 }
 
 static fbx_bool_t fbx_file_stream_exhausted(fbx_file_stream_t *stream)
