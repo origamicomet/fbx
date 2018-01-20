@@ -77,7 +77,7 @@ int main(int argc, const char *argv[]) {
 
   fbx_importer_t *importer = fbx_importer_setup(&options);
 
-  importer->stream = fbx_stream_open_from_path(path);
+  importer->stream = fbx_stream_open_from_path(path, "r");
 
   if (!importer->stream) {
     fprintf(stderr, "Cannot open \"%s\"!\n", path);

@@ -50,7 +50,10 @@
     #define FBX_ON_ANDROID 0
     #define FBX_ON_IOS 1
   #elif TARGET_OS_TVOS
+    /* Realistically, we could support tvOS... */
     #error ("We don't support tvOS!")
+  #else
+    #error ("We don't support this platform!")
   #endif
 #elif defined(__linux__)
   #if defined(ANDROID)
@@ -155,7 +158,9 @@ typedef double fbx_real64_t;
 #endif
 
 /* We (have to) define our own boolean type regardless of compiler support
-   to prevent its width from being changed on us. */
+   to prevent its width from being changed on us. We use this throughout the
+   codebase (and since it's not compatible with _Bool and bool) be careful
+   not to mix! */
 typedef fbx_uint32_t fbx_bool_t;
 
 #define FBX_TRUE  ((fbx_bool_t)1)
@@ -198,10 +203,14 @@ FBX_CHECK_SIZE_OF_TYPE(sizeof(fbx_uintptr_t) == sizeof(void *));
  *                       |___|
  */
 
+/* This library will panic if something goes horribly wrong. This will seldom
+   happen but you should still install a handler as it will allow you to get 
+   ome information about what went wrong. */
+
 typedef struct fbx_panic_info {
-  /*! File where the panic occured. */
+  /* File where the panic occured. */
   const char *file;
-  /*! Line in file where the panic occured. */
+  /* Line in file where the panic occured. */
   unsigned line;
 } fbx_panic_info_t;
 
@@ -223,11 +232,11 @@ extern FBX_EXPORT(void)
  */
 
 typedef struct fbx_allocation_info {
-  /*! File where allocation was requested. */
+  /* File where allocation was requested. */
   const char *file;
-  /*! Line in file where allocation was requested. */
+  /* Line in file where allocation was requested. */
   unsigned line;
-  /*! Optional tag indicating type or reason for allocation. */
+  /* Optional tag indicating type or reason for allocation. */
   const char *tag;
 } fbx_allocation_info_t;
 
@@ -253,76 +262,73 @@ extern FBX_EXPORT(void)
  * |_____|_/ |_____|
  */
 
-/*! A source of data. */
+/* A stream of bytes. */
 typedef struct fbx_stream fbx_stream_t;
 
-/*!
- * Wraps a @buffer of @size bytes in a stream.
- * \param @free_on_close Toggles freeing of @buffer after stream is closed.
- */
+/* Wraps a buffer as a stream. */
 extern FBX_EXPORT(fbx_stream_t *)
-  fbx_stream_open_from_memory(const void *buffer,
+  fbx_stream_open_from_memory(void *buffer,
                               fbx_size_t size,
-                              fbx_bool_t free_on_close);
+                              const char *flags);
 
 #ifndef FBX_NO_STANDARD_LIBRARY
 
-/*!
- * Wraps @file in a stream.
- * \param @close_after_use Toggles closing of @file after exhaustion.
- */
+/* Wraps file in a stream. */
 extern FBX_EXPORT(fbx_stream_t *)
-  fbx_stream_open_from_file(FILE *file,
-                            fbx_bool_t close_after_use);
+  fbx_stream_open_from_file(FILE *file);
 
-/*!
- * Opens a stream for the file at @path.
- * \param @path Absolute or relative path to file to stream.
- */
+/* Opens a file at a given path and wraps it in a stream. */
 extern FBX_EXPORT(fbx_stream_t *)
-  fbx_stream_open_from_path(const char *path);
+  fbx_stream_open_from_path(const char *path,
+                            const char *flags);
 
 #endif
 
-/*! Closes @stream. */
-extern FBX_EXPORT(void) fbx_stream_close(fbx_stream_t *stream);
+/* Closes a stream. */
+extern FBX_EXPORT(void)
+  fbx_stream_close(fbx_stream_t *stream);
 
-/*!
- * Returns absolute position in @stream.
- */
+/* Returns absolute position in a stream. */
 extern FBX_EXPORT(fbx_size_t)
   fbx_stream_tell(fbx_stream_t *stream);
 
-/*!
- * Moves to absolute @offset in @stream.
- *
- * \returns `FBX_TRUE` if seek was successful, `FBX_FALSE` otherwise.
- */
+/* Moves to an absolute offset in a stream. Returns `FBX_TRUE` if seek was
+   succesful or `FBX_FALSE` if not. */
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_seek(fbx_stream_t *stream,
                   fbx_size_t offset);
 
-/*!
- * Moves @offset bytes forward in @stream.
- *
- * \returns `FBX_TRUE` if skip was successful, `FBX_FALSE` otherwise.
- */
+/* Skips through a stream. Returns `FBX_TRUE` if skip was successful, or
+   `FBX_FALSE` otherwise if not. */
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_skip(fbx_stream_t *stream,
-                  fbx_size_t offset);
+                  fbx_size_t amount);
 
-/*!
- * Reads up to @count bytes to @buffer.
- *
- * \returns Number of bytes actually read. May be less than @count if @stream
- * is exhausted prior to completion.
- */
+#ifdef FBX_NO_IMPORT
+
+/* Reads up to some number of bytes into a buffer. Returns the number of
+   bytes actually read. May be less than requested if the stream is
+   exhausted prior to completion. */
 extern FBX_EXPORT(fbx_size_t)
   fbx_stream_read(fbx_stream_t *stream,
                   void *buffer,
                   fbx_size_t count);
 
-/*! Returns whether or not the stream is exhausted. */
+#endif
+
+#ifdef FBX_NO_EXPORT
+
+/* Writes up to some number of bytes from a buffer. Returns the number of
+   bytes actually written. May be less than requested if the stream is
+   filled prior to completion. */
+extern FBX_EXPORT(fbx_size_t)
+  fbx_stream_write(fbx_stream_t *stream,
+                   const void *buffer,
+                   fbx_size_t count);
+
+#endif
+
+/* Returns `FBX_TRUE` if a stream is exhausted, or `FBX_FALSE` if not. */
 extern FBX_EXPORT(fbx_bool_t)
   fbx_stream_exhausted(fbx_stream_t *stream);
 
@@ -828,61 +834,265 @@ void fbx_block_reset(fbx_block_t *block)
 
 /* TODO(mtwilliams): Support large files. */
 
-/* REFACTOR(mtwilliams): Support different streams through function pointers,
-   rather than loading the entire file in memory. */
+typedef fbx_size_t (fbx_stream_read_callback_fn)(fbx_stream_t *stream,
+                                                 void *buffer,
+                                                 fbx_size_t count);
+
+typedef fbx_size_t (fbx_stream_write_callback_fn)(fbx_stream_t *stream,
+                                                  const void *buffer,
+                                                  fbx_size_t count);
+
+typedef fbx_size_t (fbx_stream_tell_callback_fn)(fbx_stream_t *stream);
+
+typedef fbx_bool_t (fbx_stream_seek_callback_fn)(fbx_stream_t *stream,
+                                                 fbx_size_t offset);
+
+typedef fbx_bool_t (fbx_stream_skip_callback_fn)(fbx_stream_t *stream,
+                                                 fbx_size_t amount);
+
+typedef fbx_bool_t (fbx_stream_exhausted_callback_fn)(fbx_stream_t *stream);
+
+typedef void (fbx_stream_close_callback_fn)(fbx_stream_t *stream);
+
+typedef struct fbx_stream_dispatch {
+  fbx_stream_read_callback_fn *read;
+  fbx_stream_write_callback_fn *write;
+  fbx_stream_tell_callback_fn *tell;
+  fbx_stream_seek_callback_fn *seek;
+  fbx_stream_skip_callback_fn *skip;
+  fbx_stream_exhausted_callback_fn *exhausted;
+  fbx_stream_close_callback_fn *close;
+} fbx_stream_dispatch_t;
 
 struct fbx_stream {
-  const fbx_uint8_t *buffer;
-  fbx_size_t size_of_buffer;
-  fbx_bool_t free_on_close;
-  fbx_size_t cursor;
+  const fbx_stream_dispatch_t *dispatch;
 };
 
-fbx_stream_t *fbx_stream_open_from_memory(const void *buffer,
-                                          fbx_size_t size,
-                                          fbx_bool_t free_on_close)
+typedef struct fbx_memory_stream {
+  fbx_stream_t container;
+  fbx_uint8_t *buffer;
+  fbx_size_t size;
+  fbx_size_t cursor;
+  fbx_bool_t readable;
+  fbx_bool_t writeable;
+} fbx_memory_stream_t;
+
+extern const fbx_stream_dispatch_t fbx_memory_stream__dispatch;
+
+static fbx_stream_t *fbx_memory_stream_open(void *buffer,
+                                            fbx_size_t size,
+                                            const char *flags)
 {
-  fbx_stream_t *stream =
-    (fbx_stream_t *)FBX_ALLOCATE_TAGGED_S("stream", sizeof(fbx_stream_t), 16);
+  fbx_memory_stream_t *stream =
+    (fbx_memory_stream_t *)FBX_ALLOCATE_TAGGED_S("stream", sizeof(fbx_memory_stream_t), 16);
 
-  stream->buffer = (const fbx_uint8_t *)buffer;
-  stream->size_of_buffer = size;
+  stream->container.dispatch = &fbx_memory_stream__dispatch;
 
-  stream->free_on_close = free_on_close;
-
+  stream->buffer = (fbx_uint8_t *)buffer;
+  stream->size = size;
   stream->cursor = 0;
 
-  return stream;
+  while (const char flag = *flags++) {
+    switch (flag) {
+      case 'r': case 'R': stream->readable = FBX_TRUE; break;
+      case 'w': case 'W': stream->writeable = FBX_TRUE; break;
+    }
+  }
+
+  return &stream->container;
+}
+
+static void fbx_memory_stream_close(fbx_memory_stream_t *stream)
+{
+  fbx_free((void *)stream);
+}
+
+static fbx_size_t fbx_memory_stream_read(fbx_memory_stream_t *stream,
+                                         void *buffer,
+                                         fbx_size_t count)
+{
+  if (stream->readable) {
+    const fbx_size_t read = FBX_MIN(stream->cursor + count, stream->size);
+    fbx_copy(&stream->buffer[stream->cursor], buffer, count);
+    stream->cursor += read;
+    return read;
+  }
+
+  return 0;
+}
+
+static fbx_size_t fbx_memory_stream_write(fbx_memory_stream_t *stream,
+                                          const void *buffer,
+                                          fbx_size_t count)
+{
+  if (stream->writeable) {
+    const fbx_size_t write = FBX_MIN(stream->cursor + count, stream->size);
+    fbx_copy(buffer, &stream->buffer[stream->cursor], count);
+    stream->cursor += write;
+    return write;
+  }
+
+  return 0;
+}
+
+static fbx_size_t fbx_memory_stream_tell(fbx_memory_stream_t *stream)
+{
+  return stream->cursor;
+}
+
+static fbx_bool_t fbx_memory_stream_seek(fbx_memory_stream_t *stream,
+                                         fbx_size_t offset)
+{
+  if (offset > stream->size)
+    return FBX_FALSE;
+
+  stream->cursor = offset;
+
+  return FBX_TRUE;
+}
+
+static fbx_bool_t fbx_memory_stream_skip(fbx_memory_stream_t *stream,
+                                         fbx_size_t amount)
+{
+  if (stream->size - stream->cursor < amount)
+    return FBX_FALSE;
+
+  stream->cursor += amount;
+
+  return FBX_TRUE;
+}
+
+static fbx_bool_t fbx_memory_stream_exhausted(fbx_memory_stream_t *stream)
+{
+  return (stream->cursor == stream->size);
+}
+
+static const fbx_stream_dispatch_t fbx_memory_stream__dispatch = {
+  (fbx_stream_read_callback_fn *)&fbx_memory_stream_read,
+  (fbx_stream_write_callback_fn *)&fbx_memory_stream_write,
+  (fbx_stream_tell_callback_fn *)&fbx_memory_stream_tell,
+  (fbx_stream_seek_callback_fn *)&fbx_memory_stream_seek,
+  (fbx_stream_skip_callback_fn *)&fbx_memory_stream_skip,
+  (fbx_stream_exhausted_callback_fn *)&fbx_memory_stream_exhausted,
+  (fbx_stream_close_callback_fn *)&fbx_memory_stream_close
+};
+
+#ifndef FBX_NO_STANDARD_LIBRARY
+
+typedef struct fbx_file_stream {
+  fbx_stream_t container;
+  FILE *handle;
+  fbx_bool_t owner;
+} fbx_file_stream_t;
+
+extern const fbx_stream_dispatch_t fbx_file_stream__dispatch;
+
+fbx_stream_t *fbx_file_stream_open(FILE *handle,
+                                   fbx_bool_t owner)
+{
+  fbx_file_stream_t *stream =
+    (fbx_file_stream_t *)FBX_ALLOCATE_TAGGED_S("stream", sizeof(fbx_file_stream_t), 1);
+
+  stream->container.dispatch = &fbx_file_stream__dispatch;
+
+  stream->handle = handle;
+  stream->owner = owner;
+
+  return &stream->container;
+}
+
+void fbx_file_stream_close(fbx_file_stream *stream)
+{
+  if (stream->owner)
+    fclose(stream->handle);
+
+  fbx_free((void *)stream);
+}
+
+static fbx_size_t fbx_file_stream_read(fbx_file_stream *stream,
+                                       void *buffer,
+                                       fbx_size_t count)
+{
+  return fread(buffer, 1, count, stream->handle);
+}
+
+static fbx_size_t fbx_file_stream_write(fbx_file_stream *stream,
+                                        const void *buffer,
+                                        fbx_size_t count)
+{
+  return fwrite(buffer, 1, count, stream->handle);
+}
+
+static fbx_size_t fbx_file_stream_tell(fbx_file_stream_t *stream)
+{
+  return ftell(stream->handle);
+}
+
+static fbx_bool_t fbx_file_stream_seek(fbx_file_stream_t *stream,
+                                       fbx_size_t offset)
+{
+  return !fseek(stream->handle, offset, SEEK_SET);
+}
+
+static fbx_bool_t fbx_file_stream_skip(fbx_file_stream_t *stream,
+                                       fbx_size_t amount)
+{
+  return !fseek(stream->handle, amount, SEEK_CUR);
+}
+
+static fbx_bool_t fbx_file_stream_exhausted(fbx_file_stream_t *stream)
+{
+  return !!feof(stream->handle);
+}
+
+static const fbx_stream_dispatch_t fbx_file_stream__dispatch = {
+  (fbx_stream_read_callback_fn *)&fbx_file_stream_read,
+  (fbx_stream_write_callback_fn *)&fbx_file_stream_write,
+  (fbx_stream_tell_callback_fn *)&fbx_file_stream_tell,
+  (fbx_stream_seek_callback_fn *)&fbx_file_stream_seek,
+  (fbx_stream_skip_callback_fn *)&fbx_file_stream_skip,
+  (fbx_stream_exhausted_callback_fn *)&fbx_file_stream_exhausted,
+  (fbx_stream_close_callback_fn *)&fbx_file_stream_close
+};
+
+#endif
+
+fbx_stream_t *fbx_stream_open_from_memory(void *buffer,
+                                          fbx_size_t size,
+                                          const char *flags)
+{
+  return fbx_memory_stream_open(buffer, size, flags);
 }
 
 #ifndef FBX_NO_STANDARD_LIBRARY
 
-fbx_stream_t *fbx_stream_open_from_file(FILE *file,
-                                        fbx_bool_t close_after_use)
+fbx_stream_t *fbx_stream_open_from_file(FILE *file)
 {
-  /* Determine size of file. */
-  fseek(file, 0, SEEK_END);
-  const fbx_size_t size_of_file = ftell(file);
-  fseek(file, 0, SEEK_SET);
-
-  /* Allocate enough memory so the entire contents of the file can be read in. */
-  void *buffer = FBX_ALLOCATE_TAGGED_S("stream", size_of_file, 1);
-
-  /* Read entire contents into memory. */
-  fread(buffer, 1, size_of_file, file);
-
-  if (close_after_use)
-    /* HACK(mtwilliams): Immediately close since we're reading the contents
-       upfront, rather than streaming. */
-    fclose(file);
-
-  return fbx_stream_open_from_memory(buffer, size_of_file, FBX_TRUE);
+  return fbx_file_stream_open(file, FBX_FALSE);
 }
 
-fbx_stream_t *fbx_stream_open_from_path(const char *path)
+static void mode_from_flags(const char *flags,
+                            char *mode)
 {
-  if (FILE *file = fopen(path, "rb"))
-    return fbx_stream_open_from_file(file, FBX_TRUE);
+  while (const char flag = *flags++) {
+    switch (flag) {
+      case 'r': case 'R': *mode++ = 'r'; break;
+      case 'w': case 'W': *mode++ = 'w'; break;
+    }
+  }
+
+  *mode++ = 'b';
+}
+
+fbx_stream_t *fbx_stream_open_from_path(const char *path,
+                                        const char *flags)
+{
+  char mode[8+1] = { 0, };
+
+  mode_from_flags(flags, mode);
+
+  if (FILE *file = fopen(path, mode))
+    return fbx_file_stream_open(file, FBX_TRUE);
 
   /* Couldn't open file. */
   return NULL;
@@ -892,56 +1102,54 @@ fbx_stream_t *fbx_stream_open_from_path(const char *path)
 
 void fbx_stream_close(fbx_stream_t *stream)
 {
-  if (stream->free_on_close)
-    fbx_free((void *)stream->buffer);
-
-  fbx_free((void *)stream);
+  stream->dispatch->close(stream);
 }
 
 fbx_size_t fbx_stream_tell(fbx_stream_t *stream)
 {
-  return stream->cursor;
+  return stream->dispatch->tell(stream);
 }
 
 fbx_bool_t fbx_stream_seek(fbx_stream_t *stream,
                            fbx_size_t offset)
 {
-  if (offset > stream->size_of_buffer)
-    /* Cannot seek past end of buffer. */
-    return FBX_FALSE;
-
-  stream->cursor = offset;
-
-  return FBX_TRUE;
+  return stream->dispatch->seek(stream, offset);
 }
 
 fbx_bool_t fbx_stream_skip(fbx_stream_t *stream,
-                           fbx_size_t offset)
+                           fbx_size_t amount)
 {
-  if ((stream->size_of_buffer - stream->cursor) < offset)
-    /* Cannot skip past end of buffer. */
-    return FBX_FALSE;
-
-  stream->cursor += offset;
-
-  return FBX_TRUE;
+  return stream->dispatch->skip(stream, amount);
 }
+
+#ifndef FBX_NO_IMPORT
 
 fbx_size_t fbx_stream_read(fbx_stream_t *stream,
                            void *buffer,
                            fbx_size_t count)
 {
-  const fbx_size_t read = FBX_MIN(count, stream->size_of_buffer - stream->cursor);
-  fbx_copy(&stream->buffer[stream->cursor], buffer, read);
-  stream->cursor += read;
-  return read;
+  return stream->dispatch->read(stream, buffer, count);
 }
+
+#endif
+
+#ifndef FBX_NO_EXPORT
+
+fbx_size_t fbx_stream_write(fbx_stream_t *stream,
+                            const void *buffer,
+                            fbx_size_t count)
+{
+  return stream->dispatch->write(stream, buffer, count);
+}
+
+#endif
 
 fbx_bool_t fbx_stream_exhausted(fbx_stream_t *stream)
 {
-  /* Finished if at end of buffer. */
-  return (stream->cursor == stream->size_of_buffer);
+  return stream->dispatch->exhausted(stream);
 }
+
+#ifndef FBX_NO_IMPORT
 
 /* Boolean values are encoded as 1-bit values in the least significant bit of
    of a single byte. */
@@ -1014,6 +1222,14 @@ fbx_bool_t fbx_stream_read_uint64_as_uint32(fbx_stream_t *stream, fbx_uint32_t *
 
   return FBX_TRUE;
 }
+
+#endif
+
+#ifndef FBX_NO_EXPORT
+
+/* TODO(mtwilliams): Writing variants. */
+
+#endif
 
 /* "Safe" variants of reading operations. If reading fails, these will early
    out and cause and unwinding. */
