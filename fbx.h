@@ -159,8 +159,8 @@ typedef double fbx_real64_t;
 
 /* We (have to) define our own boolean type regardless of compiler support
    to prevent its width from being changed on us. We use this throughout the
-   codebase (and since it's not compatible with _Bool and bool) be careful
-   not to mix! */
+   codebase. Be careful not mix our type with others, since it's not
+   compatible! */
 typedef fbx_uint32_t fbx_bool_t;
 
 #define FBX_TRUE  ((fbx_bool_t)1)
@@ -205,7 +205,7 @@ FBX_CHECK_SIZE_OF_TYPE(sizeof(fbx_uintptr_t) == sizeof(void *));
 
 /* This library will panic if something goes horribly wrong. This will seldom
    happen but you should still install a handler as it will allow you to get 
-   ome information about what went wrong. */
+   some information about what went wrong. */
 
 typedef struct fbx_panic_info {
   /* File where the panic occured. */
@@ -338,50 +338,42 @@ extern FBX_EXPORT(fbx_bool_t)
  * |_|_|_|__,|_| |_|_|
  */
 
-/*!
- * \def FBX_PI
- * \brief Ratio of a circle's circumference to its diameter.
- */
+/* Ratio of a circle's circumference to its diameter. */
 #define FBX_PI 3.14159265358979323846264338327950288f
 
-/*!
- * \def FBX_TAU
- * \brief Twice as good as Pi.
- * \see FBX_PI
- */
+/* Twice as good as Pi */
 #define FBX_TAU (2.f * FBX_PI)
 
-/*! Converts degrees to radians. */
+/* Converts degrees to radians. */
 static fbx_real32_t fbx_degrees_to_radians(const fbx_real32_t degrees) {
   return degrees * (180.f / FBX_PI);
 }
 
-/*! Converts radians to degrees. */
+/* Converts radians to degrees. */
 static fbx_real32_t fbx_radians_to_degrees(const fbx_real32_t radians) {
   return radians * (FBX_PI / 180.f);
 }
 
-/*! Represents a point or a direction in two-dimensional space. */
+/* Represents a point or a direction in two-dimensional space. */
 typedef struct fbx_vec2 { fbx_real32_t x, y; } fbx_vec2_t;
 
-/*! Represents a point or a direction in three-dimensional space. */
+/* Represents a point or a direction in three-dimensional space. */
 typedef struct fbx_vec3 { fbx_real32_t x, y, z; } fbx_vec3_t;
 
-/*! Represents a point or a direction in four-dimensional space. */
+/* Represents a point or a direction in four-dimensional space. */
 typedef struct fbx_vec4 { fbx_real32_t x, y, z, w; } fbx_vec4_t;
 
-/*! Represents a direction (and optionally, a magnitude). */
+/* Represents a direction (and optionally, a magnitude). */
 typedef struct fbx_quaternion {
   fbx_real32_t x, y, z, w;
 } fbx_quaternion_t;
 
-/*! Identity quaternion. */
+/* Identity quaternion. */
 extern const fbx_quaternion_t FBX_IDENTITY_QUATERNION;
 
-/*!
- * Represents a linear transformation of three-dimensional space.
+/* Represents a linear transformation of three-dimensional space.
  *
- * \remark We store matrices in column major order. This means columns are
+ * Note that we store matrices in column major order. This means columns are
  * laid our contiguously in memory. We also uses columns vectors when
  * multiplying matrices and vectors, meaning transformations are applied
  * right-to-left.
@@ -390,10 +382,10 @@ typedef struct fbx_mat4 {
   fbx_real32_t v[4][4];
 } fbx_mat4_t;
 
-/*! Zero matrix. */
+/* Zero matrix. */
 extern const fbx_mat4_t FBX_ZERO_MATRIX;
 
-/*! Identity matrix. */
+/* Identity matrix. */
 extern const fbx_mat4_t FBX_IDENTITY_MATRIX;
 
 /*  _____     _
@@ -404,7 +396,7 @@ extern const fbx_mat4_t FBX_IDENTITY_MATRIX;
 
 /* TODO(mtwilliams): HSL, HSV, and YUV? */
 
-/*! Represents a color. */
+/* Represents a color. */
 typedef struct fbx_color {
   fbx_real32_t r, g, b, a;
 } fbx_color_t;
@@ -454,11 +446,11 @@ typedef struct fbx_texture fbx_texture_t;
 typedef struct fbx_transform fbx_transform_t;
 
 typedef struct fbx_model {
-  /*! Position relative to parent. */
+  /* Position relative to parent. */
   fbx_vec3_t position;
-  /*! Rotation relative to parent. */
+  /* Rotation relative to parent. */
   fbx_quaternion_t rotation;
-  /*! Scale relative to parent. */
+  /* Scale relative to parent. */
   fbx_vec3_t scale;
 } fbx_model_t;
 
@@ -552,22 +544,16 @@ typedef struct fbx {
 /* TODO(mtwilliams): Triangulation. */
 
 typedef struct fbx_import_options {
-  /*!
-   * Amount of memory to dedicate to permanent allocations. The permanent pool
-   * is only freed when the imported scene is freed.
-   */
+  /* The amount of memory to dedicate to permanent allocations. The permanent
+     pool is only freed when the imported scene is freed. */
   fbx_size_t permanent_memory_pool;
 
-  /*!
-   * Amount of memory to dedicate to transient allocations. The transient pool
-   * is freed after importing.
-   */
+  /* The amount of memory to dedicate to transient allocations. The transient
+     pool is freed after importing. */
   fbx_size_t transient_memory_pool;
 
-  /*!
-   * Amount of memory to dedicate to string allocations. The string pool is
-   * only freed when the imported scene is freed.
-   */
+  /* The amount of memory to dedicate to string allocations. The string pool
+     is only freed when the imported document is freed. */
   fbx_size_t strings_memory_pool;
 } fbx_import_options_t;
 
@@ -1341,9 +1327,7 @@ typedef struct fbx__zlib_huffman {
 static void fbx__zlib_build_fixed_huffman_trees(fbx__zlib_huffman_t *l_tree,
                                                 fbx__zlib_huffman_t *d_tree)
 {
-  /*
-   * Build length and literal tree.
-   */
+  /* Build length and literal tree. */
 
   for (unsigned i = 0; i < 7; ++i) l_tree->counts[i] = 0;
 
@@ -1356,9 +1340,7 @@ static void fbx__zlib_build_fixed_huffman_trees(fbx__zlib_huffman_t *l_tree,
   for (unsigned i = 0; i < 8; ++i) l_tree->code_to_symbol[24 + 144 + i] = 280 + i;
   for (unsigned i = 0; i < 112; ++i) l_tree->code_to_symbol[24 + 144 + 8 + i] = 144 + i;
 
-  /*
-   * Build distance tree.
-   */
+  /* Build distance tree. */
 
   for (unsigned i = 0; i < 5; ++i) d_tree->counts[i] = 0;
   
@@ -1507,7 +1489,7 @@ static void fbx__zlib_inflate_uncompressed_block(fbx__zlib_inflater_t *I)
   }
 
   /* Since we skipped any remaining bits to align to a byte boundary, we
-     preemptively get the next eight bits simplify `fbx__zlib_inflate_get_next_bit`. */
+     preemptively get the next eight bits to simplify `fbx__zlib_inflate_get_next_bit`. */
   I->byte = fbx__zlib_inflate_get_next_byte(I);
   I->bits = 8;
 }
@@ -1641,7 +1623,7 @@ static void fbx__zlib_inflate_dynamic_huffman_block(fbx__zlib_inflater_t *I)
   fbx__zlib_inflate_huffman_block(I, &l_tree, &d_tree);
 }
 
-/* TODO(mtwilliams): Assert that `CMF * 256 + FLG` is a multiple of 31`. */
+/* TODO(mtwilliams): Assert that `CMF * 256 + FLG` is a multiple of 31. */
 
 static int fbx__zlib_inflate(const void *in, fbx_size_t in_sz,
                              void *out, fbx_size_t out_sz)
@@ -1712,10 +1694,6 @@ static int fbx__zlib_inflate(const void *in, fbx_size_t in_sz,
       return FBX__ZLIB_EDATA;
   #endif
   }
-
-  FILE *dump = fopen("mike", "wb");
-  fwrite(out, 1, out_sz - I.room, dump);
-  fclose(dump);
 
 #if FBX__ZLIB_SAFE
   if (I.left < 4)
@@ -1896,23 +1874,7 @@ static fbx_bool_t fbx_extract_an_array(const void *cursor,
   /* As well as it's size. */
   datum->as_an_array.size = size_in_file;
 
-  switch (encoding) {
-    case FBX_RAW:
-      /* We can directly reference data attached to the node. */
-      datum->as_an_array.elements = cursor;
-      *updated = BUMP(cursor, size_in_file);
-      return FBX_TRUE;
-
-    case FBX_COMPRESSED:
-      /* Data must be decompressed by caller. See `fbx_decode_an_array`. */
-      datum->as_an_array.elements = NULL;
-      *updated = BUMP(cursor, size_in_file);
-      return FBX_TRUE;
-
-    default:
-      /* Unknown or unsupported encoding. */
-      return FBX_FALSE;
-  }
+  return FBX_TRUE;
 }
 
 static fbx_bool_t fbx_inflate_an_array(fbx_data_t *data,
@@ -1936,6 +1898,7 @@ static fbx_bool_t fbx_decode_an_array(fbx_data_t *data,
   switch (data->encoding) {
     case FBX_RAW:
       /* No need to decode. */
+      data->elements = data->raw;
       return FBX_TRUE;
 
     case FBX_COMPRESSED:
@@ -2012,7 +1975,7 @@ static fbx_bool_t fbx_extract_a_datum(const void *cursor,
   return FBX_FALSE;
 }
 
-/* Don't export internal helper macro. */
+/* Don't export our internal helper macro. */
 #undef BUMP
 
 static fbx_bool_t fbx_extract_a_datum_typed(fbx_datum_type_t type,
@@ -2097,9 +2060,6 @@ typedef enum fbx_property_type {
   FBX_COLOR_PROPERTY    = 0xe5b43cf8
 } fbx_property_type_t;
 
-/* TODO(mtwilliams): Verify that "Lcl Translation/Rotation/Scaling" are
-   unscaled three-dimensional vectors. */
-
 static fbx_property_type_t fbx_property_type_by_name(const char *name,
                                                      size_t length)
 {
@@ -2126,7 +2086,7 @@ static fbx_property_type_t fbx_property_type_by_name(const char *name,
 }
 
 typedef enum fbx_property_flag {
-  /* Signifies the property is user-defined; an "extension" in some sense. */
+  /* Signifies the property is user-defined. An "extension" in some sense. */
   FBX_PROPERTY_IS_USER_DEFINED = (1 << 31)
 } fbx_property_flag_t;
 
@@ -2163,16 +2123,13 @@ typedef struct fbx_node {
 
   /* Data associated with this node. */
   const void *data;
-
   /* Number of elements comprising `data`. */
   fbx_uint32_t num_of_datums;
-
   /* Size of `data` in bytes. */
   fbx_uint32_t size_of_data;
 
   /* Properties associated with this node. */
   const fbx_property_t *properties;
-
   /* Number of properties associated with this node. */
   fbx_uint32_t num_of_properties;
 
