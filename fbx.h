@@ -196,7 +196,7 @@ typedef enum fbx_status {
   FBX_EFORMAT  = -3, /* Malformed. */
   FBX_EVERSION = -4, /* Unsupported version. */
   FBX_EFEATURE = -5, /* Unsupported feature. */
-  FBX_EDATA    = -5, /* Bad or insufficent data. */
+  FBX_EDATA    = -6, /* Bad or insufficent data. */
 } fbx_status_t;
 
 /* TODO(mtwilliams): Free-standing. */
@@ -445,9 +445,12 @@ typedef enum fbx_object_type {
 
 typedef struct fbx_object {
   fbx_uint64_t id;
-  fbx_object_type_t type;
   const char *name;
+  fbx_object_type_t type;
   void *reified;
+  struct fbx_object *parent;
+  struct fbx_object **children;
+  fbx_uint32_t num_of_children;
 } fbx_object_t;
 
 typedef struct fbx_material fbx_material_t;
@@ -534,6 +537,7 @@ typedef struct fbx_basis {
 /* TODO(mtwilliams): Units per meter? */
 
 typedef struct fbx_scene {
+  const fbx_object_t *root;
   fbx_object_t * const *objects;
   fbx_uint32_t num_of_objects;
 } fbx_scene_t;
@@ -3333,6 +3337,31 @@ static fbx_object_t *fbx_scene_object_by_id(fbx_scene_t *scene,
   return NULL;
 }
 
+static void fbx_connect_an_object_to_another_object(fbx_importer_t *importer,
+                                                    fbx_object_t *parent,
+                                                    fbx_object_t *child)
+{
+  if (parent->children == NULL) {
+    /* Allocate enough space to support up to 255 children. */
+    parent->children =
+      (fbx_object_t **)fbx_importer_permanent_alloc(importer,
+                                                    255 * sizeof(fbx_object_t *));
+  } else {
+    if (parent->num_of_children >= 255) {
+      fbx_importer_error(importer, FBX_ESPACE, "Too many children under %llu!", parent->id);
+    }
+  }
+
+  if (child->parent != NULL) {
+    /* Although other types of connections can allow multiple links emanating
+       from the same object, this makes no sense because it's an analogue to a
+       scene graph.*/
+    fbx_importer_error(importer, FBX_EDATA, "Cannot reparent %llu under %llu.", child->id, child->parent);
+  }
+
+  parent->children[parent->num_of_children++] = child;
+}
+
 static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *importer,
                                                                fbx_node_t *root)
 {
@@ -3346,16 +3375,23 @@ static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *i
   fbx_uint32_t count;
   fbx_extract_a_datum_from_node_s(FBX_INT32_DATUM, count_node, &count);
 
-  /* TODO(mtwilliams): Insert a root node? */
-
-  /* Appears that there's an extra object counted. "GlobalSettings" appears to
-     account for it. */
+  /* Appears that there's an extra object counted because "GlobalSettings" has
+     a definition. */
   count -= 1;
+
+  /* Reserve space for implicit root object. */
+  count += 1;
 
   fbx_object_t **objects =
     (fbx_object_t **)fbx_block_allocate_s(&importer->memory.permanent,
                                           count * sizeof(fbx_object_t *));
 
+  /* We manually insert a root object since it appears to be implicit. */
+  objects[0] = fbx_importer_alloc_an_object(importer);
+  objects[0]->id = 0;
+  objects[0]->type = FBX_EMPTY;
+
+  importer->fbx->scene.root = objects[0];
   importer->fbx->scene.objects = objects;
   importer->fbx->scene.num_of_objects = count;
 
@@ -3365,7 +3401,7 @@ static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *i
   fbx_uint32_t reified = 0;
 
   for (fbx_node_t *object_node = objects_node->children; object_node; object_node = object_node->sibling)
-    objects[reified++] = fbx_reify_an_object(importer, object_node);
+    objects[++reified] = fbx_reify_an_object(importer, object_node);
 
   fbx_node_t *connections_node;
   fbx_node_child_by_name_s(root, "Connections", connections_node);
@@ -3376,13 +3412,12 @@ static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *i
     fbx_ref_to_data_t ref_to_type;
     fbx_extract_a_datum_s(FBX_STRING_DATUM, cursor, &ref_to_type);
 
-    const fbx_type_of_connection_t type =
-       fbx_type_of_connection_t(*((fbx_uint16_t *)ref_to_type.pointer));
+    union { fbx_type_of_connection_t type; char type_as_string[2]; };
+    fbx_zero(&type, sizeof(type));
+    fbx_copy(ref_to_type.pointer, type_as_string, 2);
 
-    fbx_uint64_t id_of_child;
+    fbx_uint64_t id_of_parent, id_of_child;
     fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id_of_child);
-
-    fbx_uint64_t id_of_parent;
     fbx_extract_a_datum_s(FBX_INT64_DATUM, cursor, &id_of_parent);
 
     switch (type) {
@@ -3392,6 +3427,8 @@ static fbx_bool_t fbx_reify_applicable_objects_and_connections(fbx_importer_t *i
 
         fbx_object_t *child = fbx_scene_object_by_id(&importer->fbx->scene, 
                                                      id_of_child);
+
+        fbx_connect_an_object_to_another_object(importer, parent, child);
       } break;
 
       /* TODO(mtwilliams): Determine if more advanced features rely on these
@@ -3424,11 +3461,11 @@ static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
 
   /* First node should be a header extension. */
   if (strcmp(header_extension_node->name, "FBXHeaderExtension") != 0)
-    return FBX_FALSE;
+    fbx_importer_error(importer, FBX_EFORMAT, "Missing header extension.");
 
   /* Process extended header to gather metadata. */
   if (!fbx_process_a_header_extension_node(importer, header_extension_node))
-    return FBX_FALSE;
+    fbx_importer_error(importer, FBX_EFORMAT, "Bad header extension.");
 
   fbx_node_t *global_settings_node;
   fbx_node_child_by_name_s(root, "GlobalSettings", global_settings_node);
