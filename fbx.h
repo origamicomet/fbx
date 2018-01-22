@@ -189,6 +189,16 @@ FBX_CHECK_SIZE_OF_TYPE(sizeof(fbx_uintptr_t) == sizeof(void *));
 
 #undef FBX_CHECK_SIZE_OF_TYPE
 
+typedef enum fbx_status {
+  FBX_OK       =  0,
+  FBX_EMEMORY  = -1, /* Out of memory. */
+  FBX_ESPACE   = -2, /* Ran out of space. */
+  FBX_EFORMAT  = -3, /* Malformed. */
+  FBX_EVERSION = -4, /* Unsupported version. */
+  FBX_EFEATURE = -5, /* Unsupported feature. */
+  FBX_EDATA    = -5, /* Bad or insufficent data. */
+} fbx_status_t;
+
 /* TODO(mtwilliams): Free-standing. */
 
 #include <stdlib.h>
@@ -454,14 +464,26 @@ typedef struct fbx_model {
   fbx_vec3_t scale;
 } fbx_model_t;
 
+typedef enum fbx_topology {
+  FBX_POINT    = 1,
+  FBX_TRIANGLE = 3,
+  FBX_QUADS    = 4
+} fbx_topology_t;
+
 typedef struct fbx_mesh {
+  fbx_topology_t topology;
+
+  /* TODO(mtwilliams): Provide vertex format. */
+  void * const* streams;
+
+  /* De facto... */
+  const void *positions;
+
   fbx_uint32_t num_of_vertices;
   fbx_uint32_t num_of_edges;
   fbx_uint32_t num_of_faces;
 } fbx_mesh_t;
 
-typedef struct fbx_topology fbx_topology_t;
-typedef struct fbx_geometry fbx_geometry_t;
 
 typedef struct fbx_camera fbx_camera_t;
 
@@ -584,15 +606,17 @@ FBX_END_EXTERN_C
   #include <memory.h>
 #endif
 
+/* We rely on setjmp and longjmp as it drastically reduces the complexity of
+   error handling. This, unfortunately, ties us to the standard library.
+   Theoretically you can provide your own implementation, but doing so will
+   likely be hair pulling. This shouldn't affect you too much because
+   interchange formats should be well away from your runtime. */
+#include <setjmp.h>
+
 /* Default to safer inflation and deflation that checks for errors. Error
-   handling can affect performance and relies on `setjmp`, but is better than
-   crashing! */
+   handling can affect performance but is better than crashing! */
 #ifndef FBX__ZLIB_SAFE
   #define FBX__ZLIB_SAFE 1
-#endif
-
-#ifdef FBX__ZLIB_SAFE
-  #include <setjmp.h>
 #endif
 
 /*  _____ _   _ _ _ _
@@ -1868,6 +1892,9 @@ static fbx_bool_t fbx_extract_an_array(const void *cursor,
   /* Copy count through. */
   datum->as_an_array.count = count;
 
+  /* Elements can only be accessed after decoding. */
+  datum->as_an_array.elements = NULL;
+
   /* Regardless of encoding, we keep a pointer to the raw data. */
   datum->as_an_array.raw = cursor;
 
@@ -2200,8 +2227,6 @@ static const fbx_property_t *fbx_template_property_by_name(const fbx_template_t 
 struct fbx_importer {
   const fbx_import_options_t *options;
 
-  fbx_t *fbx;
-
   fbx_stream_t *stream;
 
   struct {
@@ -2235,21 +2260,72 @@ struct fbx_importer {
 
   /* We reuse the same empty string since we encounter them so often. */
   const char *an_empty_string;
+
+  /* Imported document. */
+  fbx_t *fbx;
+
+  /* Various things can go wrong or be wrong during import. If we can't
+     recover then we jump to rapidly unwind and early out. */
+  jmp_buf error;
+
+  /* We reserve some space to store the reason for the error since an error can
+     be raised due to memory exhaustion. */
+  char reason[256];
 };
+
+static void fbx_importer_error(fbx_importer_t *importer,
+                               fbx_status_t error,
+                               const char *format,
+                               ...)
+{
+  va_list ap;
+
+  /* Format reason into space we reserved upfront. */
+  va_start(ap, format);
+  vsprintf(importer->reason, format, ap);
+  va_end(ap);
+
+  /* Unwind! See `fbx_importer_run`. */
+  longjmp(importer->error, (int)error);
+}
+
+static void *fbx_importer_transient_alloc(fbx_importer_t *importer,
+                                          fbx_size_t size)
+{
+  if (void *ptr = fbx_block_allocate(&importer->memory.transient, size))
+    return ptr;
+
+  fbx_importer_error(importer, FBX_EMEMORY, "Exhausted transient memory pool!");
+}
+
+static void *fbx_importer_permanent_alloc(fbx_importer_t *importer,
+                                          fbx_size_t size)
+{
+  if (void *ptr = fbx_block_allocate(&importer->memory.permanent, size))
+    return ptr;
+
+  fbx_importer_error(importer, FBX_EMEMORY, "Exhausted permanent memory pool!");
+}
 
 static const char *fbx_importer_intern_a_string(fbx_importer_t *importer,
                                                 const char *string,
                                                 fbx_size_t length)
 {
-  if (length) {
-    char *interned = (char *)fbx_block_allocate_s(&importer->memory.strings, length + 1);
-    fbx_copy(string, interned, length);
-    interned[length] = '\0';
-    return interned;
-  }
+  if (length == 0)
+    /* Empty string optimization. */
+    return importer->an_empty_string;    
+    
+  char *storage = (char *)fbx_block_allocate(&importer->memory.strings, length + 1);
 
-  /* Empty string optimization. */
-  return importer->an_empty_string;
+  if (!storage)
+    fbx_importer_error(importer, FBX_EMEMORY, "Exhausted string pool!");
+
+  fbx_copy(string, storage, length);
+  
+  /* Null-terminate because it's never done for us. Autodesk man... */
+  storage[length] = '\0';
+  
+  return storage;
 }
 
 static const char *fbx_importer_intern_a_string_from_ref(fbx_importer_t *importer,
@@ -2258,24 +2334,17 @@ static const char *fbx_importer_intern_a_string_from_ref(fbx_importer_t *importe
   return fbx_importer_intern_a_string(importer, ref.string, ref.length);
 }
 
-
 static fbx_node_t *fbx_importer_alloc_a_node(fbx_importer_t *importer) {
   fbx_node_t *node =
-    (fbx_node_t *)fbx_block_allocate_s(&importer->memory.transient,
-                                       sizeof(fbx_node_t));
+    (fbx_node_t *)fbx_importer_transient_alloc(importer,
+                                               sizeof(fbx_node_t));
+
+  /* Zero everything out. */
+  fbx_zero(node, sizeof(fbx_node_t));
 
   /* We assign a unique identifier to each node. This is used for internal
      house keeping and such. Do not rely on it! */
   node->id = ++importer->num_of_nodes;
-
-  /* Zero everything out. */
-  node->name = NULL;
-  node->data = NULL;
-  node->num_of_datums = 0;
-  node->size_of_data = 0;
-  node->properties = NULL;
-  node->num_of_properties = 0;
-  node->parent = node->children = node->sibling = NULL;
 
   return node;
 }
@@ -2283,11 +2352,26 @@ static fbx_node_t *fbx_importer_alloc_a_node(fbx_importer_t *importer) {
 static fbx_object_t *fbx_importer_alloc_an_object(fbx_importer_t *importer)
 {
   fbx_object_t *object =
-    (fbx_object_t *)fbx_block_allocate_s(&importer->memory.permanent,
-                                         sizeof(fbx_object_t));
+    (fbx_object_t *)fbx_importer_permanent_alloc(importer,
+                                                 sizeof(fbx_object_t));
+
+  /* Zero everything out. */
+  fbx_zero(object, sizeof(fbx_object_t));
 
   return object;
 }
+
+#define FBX_IMPORTER_DEF_ALLOC(Type, Name)                                     \
+  static Type *fbx_importer_alloc_a_##Name(fbx_importer_t *importer) {         \
+    Type *Name = (Type *)fbx_importer_permanent_alloc(importer, sizeof(Type)); \
+    fbx_zero(Name, sizeof(Type));                                              \
+    return Name;                                                               \
+  }
+
+FBX_IMPORTER_DEF_ALLOC(fbx_model_t, model);
+FBX_IMPORTER_DEF_ALLOC(fbx_mesh_t, mesh);
+
+#undef FBX_IMPORTER_DEF_ALLOC
 
 static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
 {
@@ -2295,8 +2379,6 @@ static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
     (fbx_importer_t *)FBX_ALLOCATE_TAGGED_S("importer", sizeof(fbx_importer_t), 16);
 
   importer->options = options;
-
-  importer->fbx = (fbx_t *)FBX_ALLOCATE_TAGGED_S("fbx", sizeof(fbx_t), 16);
 
   /* Stream is bound by caller. */
   importer->stream = NULL;
@@ -2337,6 +2419,9 @@ static fbx_importer_t *fbx_importer_setup(const fbx_import_options_t *options)
   char *an_empty_string = (char *)fbx_block_allocate_s(&importer->memory.strings, 1);
   an_empty_string[0] = '\0';
   importer->an_empty_string = an_empty_string;
+
+  /* Allocate space for imported document. */
+  importer->fbx = (fbx_t *)FBX_ALLOCATE_TAGGED_S("fbx", sizeof(fbx_t), 16);
 
   return importer;
 }
@@ -2958,21 +3043,9 @@ static fbx_bool_t fbx_process_any_definitions(fbx_importer_t *importer,
     return FBX_FALSE;                          \
   }
 
-static fbx_model_t *fbx_importer_alloc_a_model(fbx_importer_t *importer) {
-  fbx_model_t *model =
-    (fbx_model_t *)fbx_block_allocate_s(&importer->memory.permanent,
-                                        sizeof(fbx_model_t));
-  return model;
-}
-
-static fbx_mesh_t *fbx_importer_alloc_a_mesh(fbx_importer_t *importer) {
-  fbx_mesh_t *mesh =
-    (fbx_mesh_t *)fbx_block_allocate_s(&importer->memory.permanent,
-                                        sizeof(fbx_mesh_t));
-  return mesh;
-}
 
 /* TODO(mtwillaism): Extract information required for inverse kinematics. */
+
 /* TODO(mtwilliams): Constitute transform properly. */
 
 typedef enum fbx_order_of_rotation {
@@ -2983,6 +3056,21 @@ typedef enum fbx_order_of_rotation {
   FBX_ZXY = 4,
   FBX_ZYX = 5
 } fbx_order_of_rotation_t;
+
+static fbx_bool_t fbx_order_of_rotation_recognized(fbx_order_of_rotation_t order)
+{
+  switch (order) {
+    case FBX_XYZ:
+    case FBX_XZY:
+    case FBX_YZX:
+    case FBX_YXZ:
+    case FBX_ZXY:
+    case FBX_ZYX:
+      return FBX_TRUE;
+  }
+
+  return FBX_FALSE;
+}
 
 /* PERF(mtwilliams): Analytically derive specialization for all variants? */
 
@@ -3011,31 +3099,27 @@ fbx_quaternion_t fbx_quat_mul(const fbx_quaternion_t lhs,
   };
 }
 
-static fbx_quaternion_t fbx_quat_from_order_and_angles(fbx_order_of_rotation_t order,
+static fbx_quaternion_t rotation_from_order_and_angles(fbx_order_of_rotation_t order,
                                                        const fbx_vec3_t angles)
 {
-  fbx_quaternion_t q[3];
+  fbx_quaternion_t rot[3];
 
-  q[0] = fbx_quat_from_axis_angle({ 1.f, 0.f, 0.f }, fbx_degrees_to_radians(angles.x));
-  q[1] = fbx_quat_from_axis_angle({ 0.f, 1.f, 0.f }, fbx_degrees_to_radians(angles.y));
-  q[2] = fbx_quat_from_axis_angle({ 0.f, 0.f, 2.f }, fbx_degrees_to_radians(angles.z));
+  rot[0] = fbx_quat_from_axis_angle({ 1.f, 0.f, 0.f }, fbx_degrees_to_radians(angles.x));
+  rot[1] = fbx_quat_from_axis_angle({ 0.f, 1.f, 0.f }, fbx_degrees_to_radians(angles.y));
+  rot[2] = fbx_quat_from_axis_angle({ 0.f, 0.f, 1.f }, fbx_degrees_to_radians(angles.z));
 
-  unsigned i[3];
+  fbx_size_t idx[3];
 
   switch (order) {
-    case FBX_XYZ: i[0] = 0; i[1] = 1; i[2] = 2; break;
-    case FBX_XZY: i[0] = 0; i[1] = 2; i[2] = 1; break;
-    case FBX_YZX: i[0] = 1; i[1] = 2; i[2] = 0; break;
-    case FBX_YXZ: i[0] = 1; i[1] = 0; i[2] = 2; break;
-    case FBX_ZXY: i[0] = 2; i[1] = 0; i[2] = 1; break;
-    case FBX_ZYX: i[0] = 2; i[1] = 1; i[2] = 0; break;
-
-    default:
-      /* TODO(mtwilliams): Handle spheric rotation? */
-      FBX_PANIC("Unsupported rotation order.");
+    case FBX_XYZ: idx[0] = 0; idx[1] = 1; idx[2] = 2; break;
+    case FBX_XZY: idx[0] = 0; idx[1] = 2; idx[2] = 1; break;
+    case FBX_YZX: idx[0] = 1; idx[1] = 2; idx[2] = 0; break;
+    case FBX_YXZ: idx[0] = 1; idx[1] = 0; idx[2] = 2; break;
+    case FBX_ZXY: idx[0] = 2; idx[1] = 0; idx[2] = 1; break;
+    case FBX_ZYX: idx[0] = 2; idx[1] = 1; idx[2] = 0; break;
   }
 
-  return fbx_quat_mul(fbx_quat_mul(q[i[0]], q[i[1]]), q[i[2]]);
+  return fbx_quat_mul(fbx_quat_mul(rot[idx[0]], rot[idx[1]]), rot[idx[2]]);
 }
 
 static void *fbx_reify_a_model(fbx_importer_t *importer,
@@ -3066,14 +3150,29 @@ static void *fbx_reify_a_model(fbx_importer_t *importer,
   const fbx_order_of_rotation_t order_of_rotation =
     fbx_order_of_rotation_t(order_of_rotation_property->value.as_an_integer);
 
+  if (!fbx_order_of_rotation_recognized(order_of_rotation))
+    /* TODO(mtwilliams): Handle spheric rotation? */
+    fbx_importer_error(importer, FBX_EFEATURE, "Unsupported rotation order.");
+
   model->rotation =
-    fbx_quat_from_order_and_angles(order_of_rotation,
+    rotation_from_order_and_angles(order_of_rotation,
                                    local_rotation_property->value.as_a_vector);
 
   model->scale = local_scaling_property->value.as_a_vector;
 
   return (void *)model;
 }
+
+static void fbx_identify_topology_of_a_mesh(fbx_importer_t *importer,
+                                            fbx_node_t *node,
+                                            fbx_topology_t *topology)
+{
+  /* TODO(mtwilliams): Determine topology by counting space between indicies. */
+  *topology = FBX_POINT;
+}
+
+/* TODO(mtwilliams): Check GeometryVersion? */
+/* MEM(mtwilliams): Streaming decode? */
 
 static void *fbx_reify_a_mesh(fbx_importer_t *importer,
                               fbx_node_t *node)
@@ -3082,21 +3181,51 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
 
   fbx_mesh_t *mesh = fbx_importer_alloc_a_mesh(importer);
 
-  /* TODO(mtwilliams): Check GeometryVersion? */
+  /* Derive topology from layers. */
+  fbx_identify_topology_of_a_mesh(importer, node, &mesh->topology);
 
-  fbx_node_t *vertices_node,
-             *edges_node,
-             *polygon_vertex_index_node;
+  /* Allocate space to track streams. */
+  void **streams = (void **)fbx_block_allocate_s(&importer->memory.permanent,
+                                                 1 * sizeof(void *));
 
-  fbx_node_child_by_name_s(node, "Vertices", vertices_node);
-  fbx_node_child_by_name_s(node, "Edges", edges_node);
-  fbx_node_child_by_name_s(node, "PolygonVertexIndex", polygon_vertex_index_node);
+  /* Pass through so users can iterate over all channels and corresponding streams. */
+  mesh->streams = streams;
 
-  fbx_data_t vertices;
-  fbx_extract_a_datum_from_node_s(FBX_REAL64_DATA, vertices_node, &vertices);
+  fbx_node_t *vn;
+  fbx_node_child_by_name_s(node, "Vertices", vn);
 
-  /* Vertices may be (and likely are) encoded so we need to decode them. */
-  fbx_decode_an_array_s(&vertices, &importer->memory.permanent);
+  /* Extract vertex data and then decode it (usually inflating). We decode it
+     into transient memory rather than permanent memory because we don't want
+     to pass through double-width coordinates to users. */
+  fbx_data_t vd;
+  fbx_extract_a_datum_from_node_s(FBX_REAL64_DATA, vn, &vd);
+  fbx_decode_an_array_s(&vd, &importer->memory.transient);
+
+  /* We're fed a raw array so the number of vertices is actually a third. */
+  mesh->num_of_vertices = vd.count / 3;
+
+  fbx_real32_t *positions =
+    (fbx_real32_t *)fbx_block_allocate_s(&importer->memory.permanent,
+                                         vd.count * sizeof(fbx_real32_t));
+
+  /* Copy coordinates to permanent memory, halving precision along the way. */
+  for (fbx_uint32_t i = 0; i < vd.count; ++i)
+    positions[i] = fbx_real32_t(vd.ptr_to_real64[i]); 
+
+  /* Positions always occupy first stream. */
+  streams[0] = (void *)positions;
+
+  /* TODO(mtwilliams): Edges. */
+  mesh->num_of_edges = 0;
+
+  /* TODO(mtwilliams): Faces. */
+  mesh->num_of_faces = 0;
+
+  /* Provide direct pointers to commonly used streams. */
+  mesh->positions = streams[0];
+
+  return (void *)mesh;
+}
 
     /* Layer */
    /* LayerElement */
@@ -3118,9 +3247,6 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
    /* Smoothing */
   /* LayerElementMaterial */
    /* Materials */
-
-  return (void *)mesh;
-}
 
 /* Features */
  /* Transforms */
@@ -3168,7 +3294,7 @@ static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
     object->name = NULL;
   }
 
-  /* Rather than relying on the hard to decipher type and sub-type strings, we
+  /* Rather than relying on the hard to decipher type and sub-type strings we
      guess the type from the node's name. This appears to work well enough. */
   if (strcmp(node->name, "Model") == 0) {
     object->type = FBX_MODEL;
@@ -3183,7 +3309,7 @@ static fbx_object_t *fbx_reify_an_object(fbx_importer_t *importer,
   }
 
   if (!object->reified)
-    FBX_PANIC("Reification failed.");
+    fbx_importer_error(importer, FBX_EDATA, "Reification of %llu failed.", object->id);
 
   return object;
 }
@@ -3343,18 +3469,21 @@ static fbx_bool_t fbx_importer_process(fbx_importer_t *importer) {
   return FBX_TRUE;
 }
 
-static fbx_bool_t fbx_importer_run(fbx_importer_t *importer) {
-  if (!fbx_check_for_magic(importer->stream))
-    FBX_PANIC("Not a valid `.fbx` file?");
+static fbx_status_t fbx_importer_run(fbx_importer_t *importer)
+{
+  if (fbx_status_t status = (fbx_status_t)setjmp(importer->error))
+    return status;
 
-  if (!fbx_extract_version_from_preamble(importer->stream, &importer->fbx->version))
-    FBX_PANIC("Unexpected end of stream!");
+  if (!fbx_check_for_magic(importer->stream))
+    fbx_importer_error(importer, FBX_EFORMAT, "No magic.");
+
+  fbx_extract_version_from_preamble(importer->stream, &importer->fbx->version);
 
   if (importer->fbx->version < 7100)
-    FBX_PANIC("Cannot import because the given file uses an outdated version of FBX!");
+    fbx_importer_error(importer, FBX_EVERSION, "Given file uses an outdated format!");
 
   if (importer->fbx->version > 7500)
-    FBX_PANIC("Cannot import because the given file uses a newer version of FBX!");
+    fbx_importer_error(importer, FBX_EVERSION, "Given file uses unsupported format!");
 
   if (importer->fbx->version >= 7500)
     /* See `fbx_importer_t` for a description of binary incompatible changes
@@ -3370,10 +3499,11 @@ static fbx_bool_t fbx_importer_run(fbx_importer_t *importer) {
   fbx_importer_process(importer);
 
   /* Free backing memory used to constitute the internal node hierarchy. */
+  
   /* Validate and clean up data. */
    /* Includes triangulation the like. */
 
-  return FBX_TRUE;
+  return FBX_OK;
 }
 
 /*  _____                 _

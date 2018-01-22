@@ -86,7 +86,7 @@ int main(int argc, const char *argv[]) {
 
   fprintf(stdout, "Loading \"%s\"...\n", path);
 
-  if (!fbx_importer_run(importer))
+  if (fbx_importer_run(importer) != FBX_OK)
     fprintf(stderr, "Failed.\n");
   else
     fprintf(stdout, "Ok.\n");
