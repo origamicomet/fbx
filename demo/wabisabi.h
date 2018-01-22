@@ -1472,6 +1472,12 @@ typedef enum ws_debug_icon {
   WS_DEBUG_ICON_OPTIONS   = 63,
 } ws_debug_icon_t;
 
+typedef enum ws_debug_alignment {
+  WS_DEBUG_LEFT_ALIGN,
+  WS_DEBUG_RIGHT_ALIGN,
+  WS_DEBUG_CENTER_ALIGN,
+} ws_debug_alignment_t;
+
 extern void ws_debug_initialize(void);
 
 extern void ws_debug_shutdown(void);
@@ -1494,13 +1500,16 @@ extern void ws_debug_icon(ws_uint32_t x,
 
 extern void ws_debug_text(ws_uint32_t x,
                           ws_uint32_t y,
-                          const char *text,
-                          ws_uint32_t color);
+                          ws_uint32_t color,
+                          ws_debug_alignment_t alignment,
+                          const char *text);
 
-extern void ws_debug_text_shadowed(ws_uint32_t x,
-                                   ws_uint32_t y,
-                                   const char *text,
-                                   ws_uint32_t color);
+extern void ws_debug_textf(ws_uint32_t x,
+                           ws_uint32_t y,
+                           ws_uint32_t color,
+                           ws_debug_alignment_t alignment,
+                           const char *format,
+                           ...);
 
 extern void ws_debug_extents(const char *text,
                              ws_uint32_t *width,
@@ -1543,21 +1552,6 @@ typedef struct ws_frame {
 
   // Toggles synchronization with monitor's refresh rate.
   ws_bool_t sync;
-
-  // Mouse state.
-  struct {
-    ws_bool_t connected;
-    ws_bool_t disconnected;
-
-    ws_mouse_button_state_t left;
-    ws_mouse_button_state_t middle;
-    ws_mouse_button_state_t right;
-
-    ws_vec2_t absolute;
-    ws_vec2_t relative;
-    ws_vec2_t delta;
-    ws_vec2_t wheel;
-  } mouse;
 
   // Keyboard state.
   struct {
@@ -1636,6 +1630,21 @@ typedef struct ws_frame {
     ws_key_state_t y;
     ws_key_state_t z;
   } keyboard;
+
+  // Mouse state.
+  struct {
+    ws_bool_t connected;
+    ws_bool_t disconnected;
+
+    ws_mouse_button_state_t left;
+    ws_mouse_button_state_t middle;
+    ws_mouse_button_state_t right;
+
+    ws_vec2_t absolute;
+    ws_vec2_t relative;
+    ws_vec2_t delta;
+    ws_vec2_t wheel;
+  } mouse;
 
   // Gracefully quit after pushing if non-zero.
   ws_bool_t quit;
@@ -1901,19 +1910,11 @@ const ws_mat4_t WS_IDENTITY_MATRIX = {{
   { 0.f, 0.f, 0.f, 1.f }
 }};
 
-// BUG(mtwilliams): Near and far plane appear to be broken?
-
 ws_mat4_t ws_perspective_to_mat4(const ws_real32_t field_of_view,
                                  const ws_real32_t aspect,
                                  const ws_real32_t near,
                                  const ws_real32_t far)
 {
-  // BUG(mtwilliams): Looks broken!
-
-  // https://www.gamedev.net/articles/programming/graphics/perspective-projections-in-lh-and-rh-systems-r3598/
-  // https://www.scratchapixel.com/lessons/3d-basic-rendering/perspective-and-orthographic-projection-matrix/building-basic-perspective-projection-matrix
-  // http://vec3.ca/code/math/projection-direct3d/
-
 #ifdef WABISABI_SANE_COORDINATE_SYSTEM
   const ws_real32_t A = 1.f / tanf(ws_degrees_to_radians(field_of_view) * 0.5f);
   const ws_real32_t B = A * aspect;
@@ -1947,16 +1948,10 @@ ws_mat4_t ws_orthographic_to_mat4(const ws_real32_t top,
   const ws_real32_t A = 2.f / (right - left);
   const ws_real32_t B = 2.f / (top - bottom);
   const ws_real32_t C = 1.f / (far - near);
-  // const ws_real32_t D = -(right + left) / (right - left);
-  // const ws_real32_t E = -(top + bottom) / (bottom - top);
-  // const ws_real32_t F = -near / (far - near);
 #else
   const ws_real32_t A = 2.f / (right - left);
   const ws_real32_t B = 2.f / (top - bottom);
   const ws_real32_t C = 2.f / (far - near);
-  // const ws_real32_t D = -(right + left) / (right - left);
-  // const ws_real32_t E = -(top + bottom) / (bottom - top);
-  // const ws_real32_t F = -(far + near) / (far - near);
 #endif
 
   return {{
@@ -3862,10 +3857,10 @@ void ws_debug_icon(ws_uint32_t x,
   ws_debug_vertex(&vertices[5], x + 16, y + 16, u + 16, v + 16, color);
 }
 
-void ws_debug_text(ws_uint32_t x,
-                   ws_uint32_t y,
-                   const char *text,
-                   ws_uint32_t color)
+static void ws_debug_text_unaligned(ws_uint32_t x,
+                                    ws_uint32_t y,
+                                    ws_uint32_t color,
+                                    const char *text)
 {
   ws_debug_batch_t *batch = ws_debug_allocate_a_batch_if_necessary(GL_TRIANGLES);
 
@@ -3900,13 +3895,40 @@ void ws_debug_text(ws_uint32_t x,
   }
 }
 
-void ws_debug_text_shadowed(ws_uint32_t x,
-                            ws_uint32_t y,
-                            const char *text,
-                            ws_uint32_t color)
+void ws_debug_text(ws_uint32_t x,
+                   ws_uint32_t y,
+                   ws_uint32_t color,
+                   ws_debug_alignment_t alignment,
+                   const char *text)
 {
-  ws_debug_text(x + 1, y + 1, text, 0xFF000000);
-  ws_debug_text(x, y, text, color);
+  ws_uint32_t width, height;
+
+  ws_debug_extents(text, &width, &height);
+
+  switch (alignment) {
+    case WS_DEBUG_LEFT_ALIGN:   x = x; break;
+    case WS_DEBUG_RIGHT_ALIGN:  x = x - width; break;
+    case WS_DEBUG_CENTER_ALIGN: x = x - (width / 2); break;
+  }
+
+  ws_debug_text_unaligned(x, y, color, text);
+}
+
+void ws_debug_textf(ws_uint32_t x,
+                    ws_uint32_t y,
+                    ws_uint32_t color,
+                    ws_debug_alignment_t alignment,
+                    const char *format,
+                    ...)
+{
+  char formatted[4096];
+
+  va_list ap;
+  va_start(ap, format);
+  vsprintf(formatted, format, ap);
+  va_end(ap);
+
+  return ws_debug_text(x, y, color, alignment, formatted);
 }
 
 void ws_debug_extents(const char *text,
