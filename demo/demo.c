@@ -171,6 +171,24 @@ void render_an_empty(const fbx_object_t *object);
 void render_a_model(const fbx_object_t *object);
 void render_a_mesh(const fbx_object_t *object);
 
+static ws_bool_t project(const ws_mat4_t m, ws_vec3_t v, ws_vec3_t *p)
+{
+  ws_vec4_t projected = ws_mat4_transform_vec4(m, { v.x, v.y, v.z, 1.f });
+
+  if (projected.w <= 0.f)
+    return WS_FALSE;
+
+  projected.x /= projected.w;
+  projected.y /= projected.w;
+  projected.z /= projected.w;
+
+  p->x = projected.x;
+  p->y = projected.y;
+  p->z = projected.z;
+
+  return WS_TRUE;
+}
+
 void render_an_object(const fbx_object_t *object,
                       const ws_mat4_t parent_to_scene)
 {
@@ -186,14 +204,16 @@ void render_an_object(const fbx_object_t *object,
 
   if (r_debug) {
     if (object->name && object->type == FBX_MODEL) {
-      const ws_mat4_t object_to_screen = ws_mat4_mul(screen_from_scene, object_to_scene);
-      const ws_vec3_t position_in_ss = ws_mat4_transform_vec3(object_to_screen, { 0.f, 0.f, 0.f });
+      const ws_vec3_t position_in_ws = ws_mat4_transform_vec3(object_to_scene, { 0.f, 0.f, 0.f });
+      ws_vec3_t position_in_ss;
 
-      ws_int32_t x = frame.width * (position_in_ss.x * 0.5f + 0.5f);
-      ws_int32_t y = frame.height * (position_in_ss.y * 0.5f + 0.5f);
+      if (project(screen_from_scene, position_in_ws, &position_in_ss)) {
+        ws_int32_t x = frame.width * (position_in_ss.x * 0.5f + 0.5f);
+        ws_int32_t y = frame.height * (position_in_ss.y * 0.5f + 0.5f);
 
-      ws_debug_text(x+1, y+1, 0xff000000, WS_DEBUG_CENTER_ALIGN, object->name);
-      ws_debug_text(x, y, 0xffffffff, WS_DEBUG_CENTER_ALIGN, object->name);
+        ws_debug_text(x+1, y+1, 0xff000000, WS_DEBUG_CENTER_ALIGN, object->name);
+        ws_debug_text(x, y, 0xffffffff, WS_DEBUG_CENTER_ALIGN, object->name);
+      }
     }
   }
 
