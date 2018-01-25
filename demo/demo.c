@@ -188,6 +188,16 @@ void render_an_empty(const fbx_object_t *object, const ws_mat4_t object_to_scene
 void render_a_model(const fbx_object_t *object, const ws_mat4_t object_to_scene);
 void render_a_mesh(const fbx_object_t *object, const ws_mat4_t object_to_scene);
 
+static const struct {
+  ws_bool_t name;
+  ws_uint32_t color;
+} r_viz[] = {
+  { WS_FALSE, 0x00000000 }, /* Nothing */
+  { WS_TRUE,  0xffffffff }, /* Empty */
+  { WS_TRUE,  0xffffff00 }, /* Model */
+  { WS_TRUE,  0xff00ff00 }, /* Mesh  */
+};
+
 void render_an_object(const fbx_object_t *object,
                       const ws_mat4_t parent_to_scene)
 {
@@ -201,8 +211,11 @@ void render_an_object(const fbx_object_t *object,
   const ws_mat4_t object_to_parent = transformers[object->type](object);
   const ws_mat4_t object_to_scene = ws_mat4_mul(parent_to_scene, object_to_parent);
 
-  for (unsigned child = 0; child < object->num_of_children; ++child)
+  for (unsigned child = 0; child < object->num_of_children; ++child) {
+    depth++;
     render_an_object(object->children[child], object_to_scene);
+    depth--;
+  }
 
   static void (*renderers[])(const fbx_object_t *, const ws_mat4_t) = {
     render_an_empty,
@@ -214,7 +227,7 @@ void render_an_object(const fbx_object_t *object,
   renderers[object->type](object, object_to_scene);
 
   if (r_debug) {
-    if (object->name && object->type == FBX_MODEL) {
+    if (r_viz[object->type].name && object->name) {
       const ws_vec3_t position_in_ws = ws_mat4_transform_vec3(object_to_scene, { 0.f, 0.f, 0.f });
       const ws_vec3_t position_in_ss = ws_mat4_transform_vec3(screen_from_scene, position_in_ws);
 
@@ -222,8 +235,11 @@ void render_an_object(const fbx_object_t *object,
         ws_int32_t x = frame.width * (position_in_ss.x * 0.5f + 0.5f);
         ws_int32_t y = frame.height * (1.f - (position_in_ss.y * 0.5f + 0.5f));
 
+        x += 8 * (depth-1);
+        y += 8 * (depth-1);
+
         ws_debug_text(x+1, y+1, 0xff000000, WS_DEBUG_CENTER_ALIGN, object->name);
-        ws_debug_text(x, y, 0xffffff00, WS_DEBUG_CENTER_ALIGN, object->name);
+        ws_debug_text(x, y, r_viz[object->type].color, WS_DEBUG_CENTER_ALIGN, object->name);
       }
     }
   }
