@@ -144,9 +144,9 @@ static void print_info_about_model(const fbx_model_t *model)
 {
   /* TODO(mtwilliams): Use helpers that deal with inheritance mode. */
 
-  const fbx_vec3_t p = model->position;
-  const fbx_quaternion_t r = model->rotation;
-  const fbx_vec3_t s = model->scale;
+  const fbx_vec3_t p = model->transform.position;
+  const fbx_quaternion_t r = model->transform.rotation;
+  const fbx_vec3_t s = model->transform.scale;
 
   printf_with_indentation(depth*2+1, "Positioned at <%f, %f, %f> relative to parent.\n", p.x, p.y, p.z);
   printf_with_indentation(depth*2+1, "Rotated with <%f, %f, %f, %f> relative to parent.\n", r.x, r.y, r.z, r.w);
@@ -259,9 +259,40 @@ ws_mat4_t transform_from_model(const fbx_object_t *object)
 {
   const fbx_model_t *model = (const fbx_model_t *)object->reified;
 
-  return ws_compose_a_mat4(*(const ws_vec3_t *)&model->position,
-                           *(const ws_quaternion_t *)&model->rotation,
-                           *(const ws_vec3_t *)&model->scale);
+  const ws_mat4_t translation =
+    ws_translation_to_mat4(*(const ws_vec3_t *)&model->transform.position);
+
+  const ws_mat4_t rotation =
+    ws_rotation_to_mat4(*(const ws_quaternion_t *)&model->transform.rotation);
+
+  const ws_mat4_t scale =
+    ws_scale_to_mat4(*(const ws_vec3_t *)&model->transform.scale);
+
+  const ws_mat4_t r_pivot =
+    ws_translation_to_mat4(*(const ws_vec3_t *)&model->transform.center_of_rotation);
+
+  const ws_mat4_t r_offset =
+    ws_translation_to_mat4(*(const ws_vec3_t *)&model->transform.point_of_rotation);
+
+  const ws_mat4_t s_pivot =
+    ws_translation_to_mat4(*(const ws_vec3_t *)&model->transform.center_of_scaling);
+
+  const ws_mat4_t s_offset =
+    ws_translation_to_mat4(*(const ws_vec3_t *)&model->transform.point_of_scaling);
+
+  ws_mat4_t transform = WS_IDENTITY_MATRIX;
+
+  transform = ws_mat4_mul(transform, translation);
+  transform = ws_mat4_mul(transform, r_offset);
+  transform = ws_mat4_mul(transform, r_pivot);
+  transform = ws_mat4_mul(transform, rotation);
+  transform = ws_mat4_mul(transform, ws_mat4_inverse(r_pivot));
+  transform = ws_mat4_mul(transform, s_offset);
+  transform = ws_mat4_mul(transform, s_pivot);
+  transform = ws_mat4_mul(transform, scale);
+  transform = ws_mat4_mul(transform, ws_mat4_inverse(s_pivot));
+
+  return transform;
 }
 
 ws_mat4_t transform_from_mesh(const fbx_object_t *object)

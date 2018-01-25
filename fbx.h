@@ -458,13 +458,35 @@ typedef struct fbx_texture fbx_texture_t;
 
 typedef struct fbx_transform fbx_transform_t;
 
-typedef struct fbx_model {
+/* TODO(mtwilliams): Deal with geometric transformations to support 3DS Max. */
+
+typedef struct fbx_transform {
   /* Position relative to parent. */
   fbx_vec3_t position;
+  
   /* Rotation relative to parent. */
   fbx_quaternion_t rotation;
+
+  /* Center of rotation. */
+  fbx_vec3_t center_of_rotation;
+
+  /* Point rotated around. */
+  fbx_vec3_t point_of_rotation;
+
   /* Scale relative to parent. */
   fbx_vec3_t scale;
+
+  /* Center of scaling. */
+  fbx_vec3_t center_of_scaling;
+
+  /* Point scaled around. */
+  fbx_vec3_t point_of_scaling;
+} fbx_transform_t;
+
+/* Scaled, then rotated, then translated. */
+
+typedef struct fbx_model {
+  fbx_transform_t transform;
 } fbx_model_t;
 
 typedef enum fbx_topology {
@@ -3138,6 +3160,18 @@ static void *fbx_reify_a_model(fbx_importer_t *importer,
 
   fbx_model_t *model = fbx_importer_alloc_a_model(importer);
 
+  const fbx_property_t *translation_active_property,
+                       *rotation_active_property,
+                       *scaling_active_property;
+
+  fbx_property_or_default_by_name_s(base, node, "TranslationActive", translation_active_property);
+  fbx_property_or_default_by_name_s(base, node, "RotationActive", rotation_active_property);
+  fbx_property_or_default_by_name_s(base, node, "ScalingActive", scaling_active_property);
+  
+  fbx_property_is_type_s(FBX_BOOLEAN_PROPERTY, translation_active_property);
+  fbx_property_is_type_s(FBX_BOOLEAN_PROPERTY, rotation_active_property);
+  fbx_property_is_type_s(FBX_BOOLEAN_PROPERTY, scaling_active_property);
+
   const fbx_property_t *local_translation_property,
                        *local_rotation_property,
                        *local_scaling_property;
@@ -3150,24 +3184,101 @@ static void *fbx_reify_a_model(fbx_importer_t *importer,
   fbx_property_is_type_s(FBX_VECTOR_PROPERTY, local_rotation_property);
   fbx_property_is_type_s(FBX_VECTOR_PROPERTY, local_scaling_property);
 
-  model->position = local_translation_property->value.as_a_vector;
+  fbx_bool_t translated = translation_active_property->value.as_a_boolean;
+  fbx_bool_t rotated = rotation_active_property->value.as_a_boolean;
+  fbx_bool_t scaled = scaling_active_property->value.as_a_boolean;
 
-  const fbx_property_t *order_of_rotation_property;
-  fbx_property_or_default_by_name_s(base, node, "RotationOrder", order_of_rotation_property);
-  fbx_property_is_type_s(FBX_ENUM_PROPERTY, order_of_rotation_property);
+  /* HACK(mtwilliams): Appears that translation and scaling are implicit? */
+  translated |= FBX_TRUE;
+  scaled |= FBX_TRUE;
 
-  const fbx_order_of_rotation_t order_of_rotation =
-    fbx_order_of_rotation_t(order_of_rotation_property->value.as_an_integer);
+  if (translated) {
+    model->transform.position = local_translation_property->value.as_a_vector;
+  } else {
+    /* No translation. */
+    model->transform.position = { 0.f, 0.f, 0.f };
+  }
 
-  if (!fbx_order_of_rotation_recognized(order_of_rotation))
-    /* TODO(mtwilliams): Handle spheric rotation? */
-    fbx_importer_error(importer, FBX_EFEATURE, "Unsupported rotation order.");
+  if (rotated) {
+    const fbx_property_t *order_of_rotation_property;
+    fbx_property_or_default_by_name_s(base, node, "RotationOrder", order_of_rotation_property);
+    fbx_property_is_type_s(FBX_ENUM_PROPERTY, order_of_rotation_property);
 
-  model->rotation =
-    rotation_from_order_and_angles(order_of_rotation,
-                                   local_rotation_property->value.as_a_vector);
+    const fbx_order_of_rotation_t order_of_rotation =
+      fbx_order_of_rotation_t(order_of_rotation_property->value.as_an_integer);
 
-  model->scale = local_scaling_property->value.as_a_vector;
+    if (!fbx_order_of_rotation_recognized(order_of_rotation))
+      /* TODO(mtwilliams): Handle spheric rotation? */
+      fbx_importer_error(importer, FBX_EFEATURE, "Unsupported rotation order.");
+
+    fbx_quaternion_t rotation = 
+      rotation_from_order_and_angles(order_of_rotation,
+                                     local_rotation_property->value.as_a_vector);
+
+    const fbx_property_t *pre_rotation_property,
+                         *post_rotation_property;
+
+    fbx_property_or_default_by_name_s(base, node, "PreRotation", pre_rotation_property);
+    fbx_property_or_default_by_name_s(base, node, "PostRotation", post_rotation_property);
+
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, pre_rotation_property);
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, post_rotation_property);
+
+    fbx_quaternion_t pre_rotation =
+      rotation_from_order_and_angles(order_of_rotation,
+                                     pre_rotation_property->value.as_a_vector);
+
+    fbx_quaternion_t post_rotation =
+      rotation_from_order_and_angles(order_of_rotation,
+                                     post_rotation_property->value.as_a_vector);
+
+    /* Should we bake pre-rotation and post-rotation into rotation? */
+
+    // pre_rotation * rotation * inverse(post_rotation)
+    model->transform.rotation = rotation;
+  
+    const fbx_property_t *rotation_pivot_property,
+                         *rotation_offset_property;
+
+    fbx_property_or_default_by_name_s(base, node, "RotationPivot", rotation_pivot_property);
+    fbx_property_or_default_by_name_s(base, node, "RotationOffset", rotation_offset_property);
+    
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, rotation_pivot_property);
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, rotation_offset_property);
+
+    model->transform.center_of_rotation = rotation_pivot_property->value.as_a_vector;
+    model->transform.point_of_rotation = rotation_offset_property->value.as_a_vector;
+  } else {
+    /* No rotation. */
+    model->transform.rotation = { 0.f, 0.f, 0.f, 1.f };
+
+    /* No pivot or offset. */
+    model->transform.center_of_rotation = { 0.f, 0.f, 0.f };
+    model->transform.point_of_rotation = { 0.f, 0.f, 0.f };
+  }
+
+  if (scaled) {
+    model->transform.scale = local_scaling_property->value.as_a_vector;
+
+    const fbx_property_t *scaling_pivot_property,
+                         *scaling_offset_property;
+
+    fbx_property_or_default_by_name_s(base, node, "ScalingPivot", scaling_pivot_property);
+    fbx_property_or_default_by_name_s(base, node, "ScalingOffset", scaling_offset_property);
+    
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, scaling_pivot_property);
+    fbx_property_is_type_s(FBX_VECTOR_PROPERTY, scaling_offset_property);
+
+    model->transform.center_of_scaling = scaling_pivot_property->value.as_a_vector;
+    model->transform.point_of_scaling = scaling_offset_property->value.as_a_vector;
+  } else {
+    /* No scaling. */
+    model->transform.scale = { 1.f, 1.f, 1.f };
+
+    /* No pivot or offset. */
+    model->transform.center_of_scaling = { 0.f, 0.f, 0.f };
+    model->transform.point_of_scaling = { 0.f, 0.f, 0.f };
+  }
 
   return (void *)model;
 }
