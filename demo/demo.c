@@ -116,6 +116,17 @@ ws_mat4_t screen_from_scene,
 /* Toggles rendering of debug overlay. */
 ws_bool_t r_debug = WS_TRUE;
 
+ws_uint32_t r_program;
+
+ws_uint32_t r_time_uniform_loc;
+ws_uint32_t r_dt_uniform_loc;
+
+ws_uint32_t r_screen_from_world_uniform_loc;
+ws_uint32_t r_world_from_screen_uniform_loc;
+
+ws_uint32_t r_world_from_object_uniform_loc;
+ws_uint32_t r_object_from_world_uniform_loc;
+
 static unsigned depth = 0;
 
 static void printf_with_indentation(unsigned indentation, const char *format, ...)
@@ -142,6 +153,11 @@ static void print_info_about_model(const fbx_model_t *model)
   printf_with_indentation(depth*2+1, "Scaled by <%f, %f, %f> relative to parent.\n", s.x, s.y, s.z);
 }
 
+static void print_info_about_mesh(const fbx_mesh_t *mesh)
+{
+  printf_with_indentation(depth*2+1, "Composed of %u triangles corresponding to %u vertices.\n", mesh->num_of_faces, mesh->num_of_vertices);
+}
+
 static const char *TYPE_TO_STRING[] = { "Unknown", "Empty", "Model", "Mesh" };
 
 static void walk_and_print(const fbx_object_t *object)
@@ -153,6 +169,7 @@ static void walk_and_print(const fbx_object_t *object)
 
   switch (object->type) {
     case FBX_MODEL: print_info_about_model((const fbx_model_t *)object->reified); break;
+    case FBX_MESH: print_info_about_mesh((const fbx_mesh_t *)object->reified); break;
   }
 
   for (fbx_uint32_t child = 0; child < object->num_of_children; ++child) {
@@ -167,27 +184,9 @@ ws_mat4_t transform_from_empty(const fbx_object_t *object);
 ws_mat4_t transform_from_model(const fbx_object_t *object);
 ws_mat4_t transform_from_mesh(const fbx_object_t *object);
 
-void render_an_empty(const fbx_object_t *object);
-void render_a_model(const fbx_object_t *object);
-void render_a_mesh(const fbx_object_t *object);
-
-static ws_bool_t project(const ws_mat4_t m, ws_vec3_t v, ws_vec3_t *p)
-{
-  ws_vec4_t projected = ws_mat4_transform_vec4(m, { v.x, v.y, v.z, 1.f });
-
-  if (projected.w <= 0.f)
-    return WS_FALSE;
-
-  projected.x /= projected.w;
-  projected.y /= projected.w;
-  projected.z /= projected.w;
-
-  p->x = projected.x;
-  p->y = projected.y;
-  p->z = projected.z;
-
-  return WS_TRUE;
-}
+void render_an_empty(const fbx_object_t *object, const ws_mat4_t object_to_scene);
+void render_a_model(const fbx_object_t *object, const ws_mat4_t object_to_scene);
+void render_a_mesh(const fbx_object_t *object, const ws_mat4_t object_to_scene);
 
 void render_an_object(const fbx_object_t *object,
                       const ws_mat4_t parent_to_scene)
@@ -202,23 +201,32 @@ void render_an_object(const fbx_object_t *object,
   const ws_mat4_t object_to_parent = transformers[object->type](object);
   const ws_mat4_t object_to_scene = ws_mat4_mul(parent_to_scene, object_to_parent);
 
+  for (unsigned child = 0; child < object->num_of_children; ++child)
+    render_an_object(object->children[child], object_to_scene);
+
+  static void (*renderers[])(const fbx_object_t *, const ws_mat4_t) = {
+    render_an_empty,
+    render_an_empty,
+    render_a_model,
+    render_a_mesh
+  };
+
+  renderers[object->type](object, object_to_scene);
+
   if (r_debug) {
     if (object->name && object->type == FBX_MODEL) {
       const ws_vec3_t position_in_ws = ws_mat4_transform_vec3(object_to_scene, { 0.f, 0.f, 0.f });
-      ws_vec3_t position_in_ss;
+      const ws_vec3_t position_in_ss = ws_mat4_transform_vec3(screen_from_scene, position_in_ws);
 
-      if (project(screen_from_scene, position_in_ws, &position_in_ss)) {
+      if (position_in_ss.z < 1.f) {
         ws_int32_t x = frame.width * (position_in_ss.x * 0.5f + 0.5f);
-        ws_int32_t y = frame.height * (position_in_ss.y * 0.5f + 0.5f);
+        ws_int32_t y = frame.height * (1.f - (position_in_ss.y * 0.5f + 0.5f));
 
         ws_debug_text(x+1, y+1, 0xff000000, WS_DEBUG_CENTER_ALIGN, object->name);
-        ws_debug_text(x, y, 0xffffffff, WS_DEBUG_CENTER_ALIGN, object->name);
+        ws_debug_text(x, y, 0xffffff00, WS_DEBUG_CENTER_ALIGN, object->name);
       }
     }
   }
-
-  for (unsigned child = 0; child < object->num_of_children; ++child)
-    render_an_object(object->children[child], object_to_scene);
 }
 
 ws_mat4_t transform_from_nothing(const fbx_object_t *object)
@@ -243,6 +251,54 @@ ws_mat4_t transform_from_model(const fbx_object_t *object)
 ws_mat4_t transform_from_mesh(const fbx_object_t *object)
 {
   return WS_IDENTITY_MATRIX;
+}
+
+void render_an_empty(const fbx_object_t *object,
+                   const ws_mat4_t object_to_scene)
+{
+}
+
+void render_a_model(const fbx_object_t *object,
+                   const ws_mat4_t object_to_scene)
+{
+}
+
+void render_a_mesh(const fbx_object_t *object,
+                   const ws_mat4_t object_to_scene)
+{
+  const fbx_mesh_t *mesh = (const fbx_mesh_t *)object->reified;
+
+  ws_uint32_t vbo, ibo;
+
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ibo);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+
+  glBufferData(GL_ARRAY_BUFFER, mesh->num_of_vertices * 3 * 4, (const void *)mesh->positions, GL_STREAM_DRAW);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh->num_of_faces * 3 * 4, (const void *)mesh->indices, GL_STREAM_DRAW);
+
+  glEnableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+  glDisableVertexAttribArray(2);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * 4, 0);
+
+  glUseProgram(r_program);
+
+  const ws_mat4_t world_from_object = object_to_scene,
+                  object_from_world = ws_mat4_inverse(world_from_object);
+
+  glUniformMatrix4fv(r_world_from_object_uniform_loc, 1, GL_TRUE, (const ws_real32_t *)&world_from_object);
+  glUniformMatrix4fv(r_object_from_world_uniform_loc, 1, GL_TRUE, (const ws_real32_t *)&object_from_world);
+
+  glDrawElements(GL_TRIANGLES, 3 * mesh->num_of_faces, GL_UNSIGNED_INT, 0);
+
+  // TODO(mtwilliams): Draw vertices as well.
+  // glDrawArrays(GL_POINTS, 0, mesh->num_of_vertices);
+
+  glDeleteBuffers(1, &vbo);
+  glDeleteBuffers(1, &ibo);
 }
 
 typedef struct camera {
@@ -356,14 +412,46 @@ static void freelook(camera_t *camera, ws_real32_t dt) {
   camera_freelook(camera, &options, dt, look, move);
 }
 
-void render(const fbx_scene_t *scene)
+void setup()
 {
-  /* Walk scene to render. */
-  render_an_object(scene->root, WS_IDENTITY_MATRIX);
+  glUseProgram(r_program);
+
+  /* Update time and delta-time uniforms. */
+  glUniform1f(r_time_uniform_loc, time);
+  glUniform1f(r_dt_uniform_loc, dt);
+
+  /* Update world-view-projection uniforms. */
+  glUniformMatrix4fv(r_screen_from_world_uniform_loc, 1, GL_TRUE, (const ws_real32_t *)&screen_from_scene);
+  glUniformMatrix4fv(r_world_from_screen_uniform_loc, 1, GL_TRUE, (const ws_real32_t *)&scene_from_screen);
+
+  // glEnable(GL_CULL_FACE);
+  // glCullFace(GL_BACK);
+  // glFrontFace(GL_CW);
+
+  glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 }
 
+void finish()
+{
+  glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+}
+
+void render(const fbx_scene_t *scene)
+{
+  /* Prepare for rendering scene. */
+  setup();
+
+  /* Walk scene to render. */
+  render_an_object(scene->root, WS_IDENTITY_MATRIX);
+
+  finish();
+}
+
+ws_uint32_t program_from_sources(const char *vertex,
+                                 const char *fragment);
+
 int main(int argc, const char *argv[]) {
-#if 0
+#if 1
   static const char *path = "demo/data/monkey.fbx";
 #else
   static const char *path = "demo/data/boat.fbx";
@@ -489,6 +577,17 @@ int main(int argc, const char *argv[]) {
      system of imported scene to our coordinate system. */
   ws_mat4_t basis = WS_IDENTITY_MATRIX;
 
+  /* Compile and link shaders for rendering scene. */
+  r_program = program_from_sources(RIGID_VERTEX_SHADER, RIGID_FRAGMENT_SHADER);
+
+  /* Cache uniform locations. */
+  r_time_uniform_loc = glGetUniformLocation(r_program, "time");
+  r_dt_uniform_loc = glGetUniformLocation(r_program, "dt");
+  r_screen_from_world_uniform_loc = glGetUniformLocation(r_program, "screen_from_world");
+  r_world_from_screen_uniform_loc = glGetUniformLocation(r_program, "world_from_screen");
+  r_world_from_object_uniform_loc = glGetUniformLocation(r_program, "world_from_object");
+  r_object_from_world_uniform_loc = glGetUniformLocation(r_program, "object_from_world");
+
   for (;;) {
     ws_frame_pull(&frame);
 
@@ -549,4 +648,91 @@ int main(int argc, const char *argv[]) {
   ws_shutdown();
 
   return EXIT_SUCCESS;
+}
+
+ws_uint32_t program_from_sources(const char *vertex,
+                                 const char *fragment)
+{
+  ws_uint32_t program = glCreateProgram();
+
+  ws_uint32_t vs = glCreateShader(GL_VERTEX_SHADER);
+  ws_uint32_t fs = glCreateShader(GL_FRAGMENT_SHADER);
+
+  glShaderSource(vs, 1, &vertex, NULL);
+  glShaderSource(fs, 1, &fragment, NULL);
+
+  glCompileShader(vs);
+  glCompileShader(fs);
+
+  ws_int32_t vs_compiled_successfully;
+  ws_int32_t fs_compiled_successfully;
+
+  glGetShaderiv(vs, GL_COMPILE_STATUS, &vs_compiled_successfully);
+  glGetShaderiv(fs, GL_COMPILE_STATUS, &fs_compiled_successfully);
+
+  if (!vs_compiled_successfully) {
+    ws_int32_t length;
+    glGetShaderiv(vs, GL_INFO_LOG_LENGTH, &length);
+
+    char *log = (char *)ws_allocate_s(length + 1, 1);
+    glGetShaderInfoLog(vs, length, NULL, log);
+
+    fprintf(stderr, "Vertex shader compilation failed!\n");
+    fputs(log, stderr);
+    fprintf(stderr, "---\n");
+  }
+
+  if (!fs_compiled_successfully) {
+    ws_int32_t length;
+    glGetShaderiv(fs, GL_INFO_LOG_LENGTH, &length);
+
+    char *log = (char *)ws_allocate_s(length + 1, 1);
+    glGetShaderInfoLog(fs, length, NULL, log);
+
+    fprintf(stderr, "Fragment shader compilation failed!\n");
+    fputs(log, stderr);
+    fprintf(stderr, "---\n");
+  }
+
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+
+  glLinkProgram(program);
+
+  ws_int32_t program_linked_successfully;
+
+  glGetProgramiv(program, GL_LINK_STATUS, &program_linked_successfully);
+
+  if (!program_linked_successfully) {
+    ws_int32_t length;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+
+    char *log = (char *)ws_allocate_s(length + 1, 1);
+    glGetProgramInfoLog(program, length, NULL, log);
+
+    fprintf(stderr, "Shader linking failed!\n");
+    fputs(log, stderr);
+    fprintf(stderr, "---\n");
+  }
+
+  glDetachShader(program, vs);
+  glDetachShader(program, fs);
+
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+
+  const ws_bool_t successful = vs_compiled_successfully &&
+                               fs_compiled_successfully &&
+                               program_linked_successfully;
+
+  if (!successful) {
+    glDeleteProgram(program);
+    return 0;
+  }
+
+  // Temporarily bind to ensure the shader is truly ready.
+  glUseProgram(program);
+  glUseProgram(0);
+
+  return program;
 }
