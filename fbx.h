@@ -474,16 +474,21 @@ typedef enum fbx_topology {
 } fbx_topology_t;
 
 typedef struct fbx_mesh {
-  fbx_topology_t topology;
-
   /* TODO(mtwilliams): Provide vertex format. */
   void * const* streams;
 
   /* De facto... */
   const void *positions;
 
+  const fbx_uint32_t *indices;
+
+  /* Number of vertices composing geometry. */
   fbx_uint32_t num_of_vertices;
+
+  /* Number of edges in geometry. */
   fbx_uint32_t num_of_edges;
+
+  /* Number of triangles composing geometry. */
   fbx_uint32_t num_of_faces;
 } fbx_mesh_t;
 
@@ -3167,16 +3172,55 @@ static void *fbx_reify_a_model(fbx_importer_t *importer,
   return (void *)model;
 }
 
-static void fbx_identify_topology_of_a_mesh(fbx_importer_t *importer,
-                                            fbx_node_t *node,
-                                            fbx_topology_t *topology)
+#if 0
+
+static fbx_bool_t fbx_identify_topology_of_geometry(fbx_importer_t *importer,
+                                                    fbx_data_t fd,
+                                                    fbx_topology_t *topology)
 {
-  /* TODO(mtwilliams): Determine topology by counting space between indicies. */
-  *topology = FBX_POINT;
+  const fbx_int32_t *indices = fd.ptr_to_int32;
+
+  /* Determine topology by finding the first negative index. */
+  if (indices[1-1] < 0) return *topology = FBX_POINT, FBX_TRUE;
+  if (indices[3-1] < 0) return *topology = FBX_TRIANGLE, FBX_TRUE;
+  if (indices[4-1] < 0) return *topology = FBX_QUAD, FBX_TRUE;
+  if (indices[5-1] < 0) return *topology = FBX_PENTAGONAL, FBX_TRUE;
+  if (indices[6-1] < 0) return *topology = FBX_HEXAGONAL, FBX_TRUE;
+  if (indices[7-1] < 0) return *topology = FBX_HEPTAGONAL, FBX_TRUE;
+  if (indices[8-1] < 0) return *topology = FBX_OCTAGONAL, FBX_TRUE;
+
+  /* Unknown topology. Probably something esoteric. */
+  return FBX_FALSE;
 }
+
+#endif
 
 /* TODO(mtwilliams): Check GeometryVersion? */
 /* MEM(mtwilliams): Streaming decode? */
+
+/* TODO(mtwilliams): Peek at next index to determine what index our last
+   vertex of our last triangle should be and use that to select the order
+   we triangulate this polygon to make triangle strips rather than soups. */
+
+/* Fan triangulation. */
+static fbx_uint32_t triangulate(const fbx_int32_t *indices,
+                                fbx_uint32_t n,
+                                fbx_uint32_t *derived)
+{
+  for (fbx_uint32_t i = 1, j = 2; j < n-1; i = j++) {
+    *derived++ = indices[0];
+    *derived++ = indices[i];
+    *derived++ = indices[j];
+  }
+
+  /* Last triangle is special-cased since the last index is complemented to
+     indicate end of polygon. */
+  *derived++ = indices[0];
+  *derived++ = indices[n-2];
+  *derived++ = ~indices[n-1];
+
+  return n - 2;
+}
 
 static void *fbx_reify_a_mesh(fbx_importer_t *importer,
                               fbx_node_t *node)
@@ -3184,9 +3228,6 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
   const fbx_template_t *base = importer->geometry_template;
 
   fbx_mesh_t *mesh = fbx_importer_alloc_a_mesh(importer);
-
-  /* Derive topology from layers. */
-  fbx_identify_topology_of_a_mesh(importer, node, &mesh->topology);
 
   /* Allocate space to track streams. */
   void **streams = (void **)fbx_block_allocate_s(&importer->memory.permanent,
@@ -3198,9 +3239,8 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
   fbx_node_t *vn;
   fbx_node_child_by_name_s(node, "Vertices", vn);
 
-  /* Extract vertex data and then decode it (usually inflating). We decode it
-     into transient memory rather than permanent memory because we don't want
-     to pass through double-width coordinates to users. */
+  /* We extract vertex data into transient memory rather than permanent memory
+     because we don't want to pass through double-width coordinates to users. */
   fbx_data_t vd;
   fbx_extract_a_datum_from_node_s(FBX_REAL64_DATA, vn, &vd);
   fbx_decode_an_array_s(&vd, &importer->memory.transient);
@@ -3208,9 +3248,10 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
   /* We're fed a raw array so the number of vertices is actually a third. */
   mesh->num_of_vertices = vd.count / 3;
 
+  /* Allocate storage for coordinates that we'll pass to users. */
   fbx_real32_t *positions =
-    (fbx_real32_t *)fbx_block_allocate_s(&importer->memory.permanent,
-                                         vd.count * sizeof(fbx_real32_t));
+    (fbx_real32_t *)fbx_importer_permanent_alloc(importer,
+                                                 vd.count * sizeof(fbx_real32_t));
 
   /* Copy coordinates to permanent memory, halving precision along the way. */
   for (fbx_uint32_t i = 0; i < vd.count; ++i)
@@ -3219,11 +3260,42 @@ static void *fbx_reify_a_mesh(fbx_importer_t *importer,
   /* Positions always occupy first stream. */
   streams[0] = (void *)positions;
 
-  /* TODO(mtwilliams): Edges. */
-  mesh->num_of_edges = 0;
+  fbx_node_t *fn;
+  fbx_node_child_by_name_s(node, "PolygonVertexIndex", fn);
 
-  /* TODO(mtwilliams): Faces. */
-  mesh->num_of_faces = 0;
+  /* Extract polygonal data into temporary memory since topology can change on
+     us willy-nilly and we want to pass users sane topology. */
+  fbx_data_t fd;
+  fbx_extract_a_datum_from_node_s(FBX_INT32_DATA, fn, &fd);
+  fbx_decode_an_array_s(&fd, &importer->memory.transient);
+
+  /* Number of polyons and triangles. */
+  fbx_uint32_t np = 0, nt = 0;
+
+  /* Walk over indices to determine number polygons and triangles. */
+  for (fbx_uint32_t i = 0, n = 0; i < fd.count; ++i, ++n)
+    if (fd.ptr_to_int32[i] < 0)
+      np++, nt += n - 2, n = 0;
+
+  /* Allocate space for mapping from polygon to triangles. */
+    /* This is filled while triangulating XXX. */
+
+  /* Allocate space for triangulated indicies. */
+  fbx_uint32_t *indices =
+    (fbx_uint32_t *)fbx_importer_permanent_alloc(importer,
+                                                 3 * nt * sizeof(fbx_uint32_t));
+
+  mesh->indices = indices;
+
+  /* Triangulate polygons to normalize topology. */
+  for (fbx_uint32_t i = 0, j = 0, t = 0; i < fd.count; ++i) {
+    if (fd.ptr_to_int32[i] < 0) {
+      t += triangulate(&fd.ptr_to_int32[j], i-j+1, &indices[t*3]);
+      j = i + 1;
+    }
+  }
+
+  mesh->num_of_faces = nt;
 
   /* Provide direct pointers to commonly used streams. */
   mesh->positions = streams[0];
@@ -3355,7 +3427,7 @@ static void fbx_connect_an_object_to_another_object(fbx_importer_t *importer,
   if (child->parent != NULL) {
     /* Although other types of connections can allow multiple links emanating
        from the same object, this makes no sense because it's an analogue to a
-       scene graph.*/
+       scene graph. */
     fbx_importer_error(importer, FBX_EDATA, "Cannot reparent %llu under %llu.", child->id, child->parent);
   }
 
